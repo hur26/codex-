@@ -27,6 +27,7 @@ SENSITIVE_KEY_PARTS = {
     "cmd",
     "code",
     "command",
+    "command_args",
     "content",
     "env",
     "environment",
@@ -35,8 +36,24 @@ SENSITIVE_KEY_PARTS = {
     "messages",
     "output",
     "prompt",
+    "prompt_text",
     "text",
+    "tool_input",
+    "tool_output",
 }
+
+SAFE_KEY_PARTS = IDENTITY_KEY_PARTS | SENSITIVE_KEY_PARTS | {
+    "hook_type",
+    "items",
+    "nested",
+    "tool",
+    "tool_name",
+    "type",
+}
+
+MAX_DEPTH = 32
+MAX_NODES = 512
+MAX_CONTAINER_ITEMS = 128
 
 
 def _kind(value: Any) -> str:
@@ -57,18 +74,45 @@ def _fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
-def _walk(value: Any, path: str, shape: list[dict], identities: list[dict]) -> None:
+def _safe_key_label(key: Any) -> str:
+    normalized_key = str(key).lower()
+    if normalized_key in SAFE_KEY_PARTS:
+        return normalized_key
+    return f"key_{_fingerprint(str(key))}"
+
+
+def _walk(
+    value: Any,
+    path: str,
+    shape: list[dict],
+    identities: list[dict],
+    *,
+    depth: int = 0,
+) -> bool:
+    if len(shape) >= MAX_NODES:
+        return False
+
     kind = _kind(value)
     item = {"path": path, "kind": kind}
     if kind == "string":
         item["length"] = len(str(value))
     shape.append(item)
 
+    if depth >= MAX_DEPTH and isinstance(value, (dict, list)):
+        item["truncated"] = True
+        return True
+
     if isinstance(value, dict):
-        for key in sorted(value):
+        keys = sorted(value, key=_safe_key_label)
+        if len(keys) > MAX_CONTAINER_ITEMS:
+            item["truncated"] = True
+        for key in keys[:MAX_CONTAINER_ITEMS]:
+            if len(shape) >= MAX_NODES:
+                item["truncated"] = True
+                break
             child = value[key]
-            child_path = f"{path}.{key}"
             normalized_key = str(key).lower()
+            child_path = f"{path}.{_safe_key_label(key)}"
             if normalized_key in SENSITIVE_KEY_PARTS:
                 shape.append(
                     {
@@ -78,7 +122,9 @@ def _walk(value: Any, path: str, shape: list[dict], identities: list[dict]) -> N
                     }
                 )
                 continue
-            if normalized_key in IDENTITY_KEY_PARTS and child is not None:
+            if normalized_key in IDENTITY_KEY_PARTS and isinstance(
+                child, (str, int, float, bool)
+            ):
                 text = str(child)
                 identities.append(
                     {
@@ -88,10 +134,32 @@ def _walk(value: Any, path: str, shape: list[dict], identities: list[dict]) -> N
                         "fingerprint": _fingerprint(text),
                     }
                 )
-            _walk(child, child_path, shape, identities)
+            if not _walk(
+                child,
+                child_path,
+                shape,
+                identities,
+                depth=depth + 1,
+            ):
+                item["truncated"] = True
+                break
     elif isinstance(value, list):
-        for index, child in enumerate(value):
-            _walk(child, f"{path}[{index}]", shape, identities)
+        if len(value) > MAX_CONTAINER_ITEMS:
+            item["truncated"] = True
+        for index, child in enumerate(value[:MAX_CONTAINER_ITEMS]):
+            if len(shape) >= MAX_NODES:
+                item["truncated"] = True
+                break
+            if not _walk(
+                child,
+                f"{path}[{index}]",
+                shape,
+                identities,
+                depth=depth + 1,
+            ):
+                item["truncated"] = True
+                break
+    return True
 
 
 def summarize_event(
@@ -112,7 +180,7 @@ def summarize_event(
         "received_at": timestamp.isoformat(),
         "hook_type": hook_type if isinstance(hook_type, str) else "unknown",
         "tool_name": tool_name if isinstance(tool_name, str) else "",
-        "top_level_keys": sorted(str(key) for key in payload),
+        "top_level_keys": sorted(_safe_key_label(key) for key in payload),
         "identity_candidates": identities,
         "shape": shape,
     }
