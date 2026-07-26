@@ -115,6 +115,105 @@ class AnalyzeDirectoryTests(unittest.TestCase):
                 {"PostToolUse": 1, "PreToolUse": 2},
             )
 
+    def test_reports_anonymous_groups_in_first_seen_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first_fingerprint = "bbbbbbbbbbbbbbbb"
+            second_fingerprint = "aaaaaaaaaaaaaaaa"
+            write_event(root, "00-array.json", [])
+            (root / "00-malformed.json").write_text("{", encoding="utf-8")
+            events = [
+                ("01.json", "PreToolUse", first_fingerprint),
+                ("02.json", "PreToolUse", second_fingerprint),
+                ("03.json", "PostToolUse", first_fingerprint),
+                ("04.json", "PostToolUse", second_fingerprint),
+                ("05.json", "Stop", first_fingerprint),
+                ("06.json", "Stop", second_fingerprint),
+            ]
+            for filename, hook_type, fingerprint in events:
+                write_event(
+                    root,
+                    filename,
+                    {
+                        "hook_type": hook_type,
+                        "identity_candidates": [
+                            {
+                                "path": "$.session_id",
+                                "fingerprint": fingerprint,
+                            }
+                        ],
+                    },
+                )
+
+            report = analyze_directory(root)
+
+            groups = report["identity_paths"]["$.session_id"]["groups"]
+            self.assertTrue(report["anonymous_group_labels_comparable"])
+            self.assertEqual(
+                groups,
+                [
+                    {
+                        "label": "group_1",
+                        "events": 3,
+                        "hook_types": {
+                            "PostToolUse": 1,
+                            "PreToolUse": 1,
+                            "Stop": 1,
+                        },
+                        "first_event_index": 1,
+                        "last_event_index": 5,
+                    },
+                    {
+                        "label": "group_2",
+                        "events": 3,
+                        "hook_types": {
+                            "PostToolUse": 1,
+                            "PreToolUse": 1,
+                            "Stop": 1,
+                        },
+                        "first_event_index": 2,
+                        "last_event_index": 6,
+                    },
+                ],
+            )
+            serialized = json.dumps(report)
+            self.assertNotIn(first_fingerprint, serialized)
+            self.assertNotIn(second_fingerprint, serialized)
+
+    def test_counts_duplicate_identity_candidate_once_per_event_group(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            candidate = {
+                "path": "$.session_id",
+                "fingerprint": "aaaaaaaaaaaaaaaa",
+            }
+            write_event(
+                root,
+                "event.json",
+                {
+                    "hook_type": "PreToolUse",
+                    "identity_candidates": [candidate, candidate.copy()],
+                },
+            )
+
+            report = analyze_directory(root)
+
+            identity = report["identity_paths"]["$.session_id"]
+            self.assertEqual(identity["events"], 1)
+            self.assertEqual(identity["hook_types"], {"PreToolUse": 1})
+            self.assertEqual(
+                identity["groups"],
+                [
+                    {
+                        "label": "group_1",
+                        "events": 1,
+                        "hook_types": {"PreToolUse": 1},
+                        "first_event_index": 1,
+                        "last_event_index": 1,
+                    }
+                ],
+            )
+
     def test_rejects_unsanitized_values_without_leaking_secrets(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -298,6 +397,40 @@ class AnalyzeDirectoryTests(unittest.TestCase):
 
             self.assertEqual(report["event_count"], MAX_FILES)
             self.assertTrue(report["file_limit_reached"])
+
+    def test_file_limit_stops_after_bounded_sample_and_marks_groups_unstable(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            paths = []
+            for index in range(MAX_FILES + 1):
+                hook_type = "Stop"
+                if index == 0:
+                    hook_type = "PreToolUse"
+                elif index == MAX_FILES:
+                    hook_type = "SessionStart"
+                path = root / f"{index:04}.json"
+                write_event(root, path.name, {"hook_type": hook_type})
+                paths.append(path)
+
+            def bounded_glob():
+                yield from reversed(paths)
+                raise AssertionError("glob consumed beyond MAX_FILES + 1")
+
+            with mock.patch(
+                "tools.codex_probe.analyze.Path.glob",
+                return_value=bounded_glob(),
+            ):
+                report = analyze_directory(root)
+
+            self.assertTrue(report["file_limit_reached"])
+            self.assertFalse(report["anonymous_group_labels_comparable"])
+            self.assertEqual(report["event_count"], MAX_FILES)
+            self.assertEqual(
+                report["hook_types"],
+                {"PreToolUse": 1, "Stop": MAX_FILES - 1},
+            )
 
 
 class AtomicReportTests(unittest.TestCase):

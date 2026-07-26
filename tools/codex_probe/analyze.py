@@ -125,18 +125,19 @@ def _sample_json_files(root: Path) -> tuple[list[Path], bool]:
         itertools.islice(root.glob("*.json"), MAX_FILES + 1)
     )
     limit_reached = len(sampled) > MAX_FILES
+    sampled.sort(key=lambda path: path.name)
     paths = [
         path
         for path in sampled[:MAX_FILES]
         if path.is_file() and not path.is_symlink()
     ]
-    paths.sort(key=lambda path: path.name)
     return paths, limit_reached
 
 
 def analyze_directory(root: Path) -> dict[str, Any]:
     event_count = 0
     fingerprints: dict[str, set[str]] = defaultdict(set)
+    anonymous_groups: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     event_totals: Counter[str] = Counter()
     hooks_by_path: dict[str, Counter[str]] = defaultdict(Counter)
     skipped_files: Counter[str] = Counter()
@@ -177,6 +178,7 @@ def analyze_directory(root: Path) -> dict[str, Any]:
         if len(candidates) > MAX_CANDIDATES_PER_EVENT:
             truncated["candidates"] += len(candidates) - MAX_CANDIDATES_PER_EVENT
 
+        seen_candidates: set[tuple[str, str]] = set()
         for index, candidate in enumerate(candidates):
             if index >= MAX_CANDIDATES_PER_EVENT:
                 break
@@ -191,6 +193,10 @@ def analyze_directory(root: Path) -> dict[str, Any]:
             if not _is_safe_fingerprint(fingerprint):
                 invalid_records["fingerprints"] += 1
                 continue
+            candidate_identity = (candidate_path, fingerprint)
+            if candidate_identity in seen_candidates:
+                continue
+            seen_candidates.add(candidate_identity)
 
             if (
                 candidate_path not in fingerprints
@@ -208,14 +214,37 @@ def analyze_directory(root: Path) -> dict[str, Any]:
                 truncated["fingerprints"] += 1
             else:
                 known_fingerprints.add(fingerprint)
+                groups_for_path = anonymous_groups[candidate_path]
+                group = groups_for_path.get(fingerprint)
+                if group is None:
+                    group = {
+                        "label": f"group_{len(groups_for_path) + 1}",
+                        "events": 0,
+                        "hook_types": Counter(),
+                        "first_event_index": event_count,
+                        "last_event_index": event_count,
+                    }
+                    groups_for_path[fingerprint] = group
+                group["events"] += 1
+                group["hook_types"][hook_type] += 1
+                group["last_event_index"] = event_count
             hooks_by_path[candidate_path][hook_type] += 1
 
     identity_paths = {}
     for candidate_path in sorted(fingerprints):
+        groups = []
+        for group in anonymous_groups[candidate_path].values():
+            groups.append(
+                {
+                    **group,
+                    "hook_types": dict(sorted(group["hook_types"].items())),
+                }
+            )
         identity_paths[candidate_path] = {
             "distinct_fingerprints": len(fingerprints[candidate_path]),
             "events": sum(hooks_by_path[candidate_path].values()),
             "hook_types": dict(sorted(hooks_by_path[candidate_path].items())),
+            "groups": groups,
         }
 
     return {
@@ -223,6 +252,7 @@ def analyze_directory(root: Path) -> dict[str, Any]:
         "event_count": event_count,
         "hook_types": dict(sorted(event_totals.items())),
         "identity_paths": identity_paths,
+        "anonymous_group_labels_comparable": not file_limit_reached,
         "file_limit_reached": file_limit_reached,
         "skipped_files": {
             key: skipped_files[key]

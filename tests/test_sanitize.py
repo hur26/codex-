@@ -69,7 +69,7 @@ class SummarizeEventTests(unittest.TestCase):
         serialized = json.dumps(summary, ensure_ascii=False)
 
         self.assertEqual(summary["hook_type"], "PreToolUse")
-        self.assertEqual(summary["tool_name"], "exec_command")
+        self.assertEqual(summary["tool_name"], "present")
         self.assertEqual(summary["top_level_keys"], sorted(payload))
         self.assertEqual(summary["received_at"], "2026-07-26T08:00:00+00:00")
         self.assertNotIn("thread-secret-123", serialized)
@@ -85,6 +85,96 @@ class SummarizeEventTests(unittest.TestCase):
         self.assertIn("$.cwd", identities)
         self.assertRegex(identities["$.thread_id"]["fingerprint"], r"^[0-9a-f]{16}$")
         self.assertEqual(identities["$.thread_id"]["length"], 17)
+
+    def test_normalizes_untrusted_tool_name_without_exposing_its_value(self):
+        marker = "PRIVATE_TOOL_NAME_MARKER"
+        for field_name in ("tool_name", "tool"):
+            with self.subTest(field_name=field_name):
+                summary = summarize_event(
+                    {
+                        "hook_type": "PreToolUse",
+                        field_name: marker,
+                    },
+                    received_at=datetime(
+                        2026,
+                        7,
+                        26,
+                        8,
+                        0,
+                        tzinfo=timezone.utc,
+                    ),
+                )
+                serialized = json.dumps(summary, ensure_ascii=False)
+
+                self.assertEqual(summary["tool_name"], "present")
+                self.assertNotIn(marker, serialized)
+
+    def test_omits_missing_or_non_string_tool_name(self):
+        for payload in (
+            {"hook_type": "PreToolUse"},
+            {"hook_type": "PreToolUse", "tool_name": ""},
+            {"hook_type": "PreToolUse", "tool_name": 42},
+        ):
+            with self.subTest(payload=payload):
+                summary = summarize_event(
+                    payload,
+                    received_at=datetime(
+                        2026,
+                        7,
+                        26,
+                        8,
+                        0,
+                        tzinfo=timezone.utc,
+                    ),
+                )
+
+                self.assertEqual(summary["tool_name"], "")
+
+    def test_uses_non_empty_tool_alias_when_primary_name_is_invalid(self):
+        marker = "PRIVATE_TOOL_ALIAS_MARKER"
+        for primary_value in ("", 42):
+            with self.subTest(primary_value=primary_value):
+                summary = summarize_event(
+                    {
+                        "hook_type": "PreToolUse",
+                        "tool_name": primary_value,
+                        "tool": marker,
+                    },
+                    received_at=datetime(
+                        2026,
+                        7,
+                        26,
+                        8,
+                        0,
+                        tzinfo=timezone.utc,
+                    ),
+                )
+                serialized = json.dumps(summary, ensure_ascii=False)
+
+                self.assertEqual(summary["tool_name"], "present")
+                self.assertNotIn(marker, serialized)
+
+    def test_redacts_tool_name_lengths_from_shape(self):
+        summary = summarize_event(
+            {
+                "hook_type": "PreToolUse",
+                "tool_name": "short-secret",
+                "tool": "a-much-longer-private-tool-alias",
+            },
+            received_at=datetime(2026, 7, 26, 8, 0, tzinfo=timezone.utc),
+        )
+        shape = {item["path"]: item for item in summary["shape"]}
+
+        for path in ("$.tool_name", "$.tool"):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    shape[path],
+                    {
+                        "path": path,
+                        "kind": "string",
+                        "redacted": True,
+                    },
+                )
 
     def test_records_shape_without_scalar_values(self):
         summary = summarize_event(

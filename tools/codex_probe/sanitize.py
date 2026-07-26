@@ -40,7 +40,9 @@ SENSITIVE_KEY_PARTS = {
     "prompt",
     "prompt_text",
     "text",
+    "tool",
     "tool_input",
+    "tool_name",
     "tool_output",
 }
 
@@ -49,8 +51,6 @@ SAFE_KEY_PARTS = IDENTITY_KEY_PARTS | SENSITIVE_KEY_PARTS | {
     "hook_type",
     "items",
     "nested",
-    "tool",
-    "tool_name",
     "type",
 }
 
@@ -206,13 +206,21 @@ def summarize_event(
         if isinstance(candidate, str) and candidate in HOOK_EVENT_NAMES:
             hook_type = candidate
         break
-    tool_name = payload.get("tool_name", payload.get("tool", ""))
+    tool_names = (payload.get("tool_name"), payload.get("tool"))
+    normalized_tool_name = (
+        "present"
+        if any(
+            isinstance(tool_name, str) and tool_name
+            for tool_name in tool_names
+        )
+        else ""
+    )
 
     return {
         "schema_version": 1,
         "received_at": timestamp.isoformat(),
         "hook_type": hook_type,
-        "tool_name": tool_name if isinstance(tool_name, str) else "",
+        "tool_name": normalized_tool_name,
         "top_level_keys": sorted(
             _safe_key_label(key) for key in top_level_key_sample
         ),
