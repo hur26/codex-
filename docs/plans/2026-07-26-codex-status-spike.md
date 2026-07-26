@@ -437,6 +437,14 @@ git commit -m "feat: add append-only Codex hook probe"
 - Create: `tools/codex_probe/analyze.py`
 - Test: `tests/test_analyze.py`
 
+**Security amendment discovered during review:**
+
+- A valid fingerprint is the sanitizer's actual output format: exactly 16 lowercase hexadecimal characters. Tests must use values such as `aaaaaaaaaaaaaaaa` and `bbbbbbbbbbbbbbbb`, not placeholder strings such as `aaa` or `bbb`.
+- Treat spool files as untrusted even though the probe normally creates them. Reject non-string hook types, paths, and fingerprints rather than coercing them with `str()`.
+- Bound file count, file bytes, candidates per event, identity paths, and distinct fingerprints. For inputs within the limits, preserve the aggregation behavior below. When a limit is exceeded, return a truncation/skipped diagnostic instead of processing without bound.
+- Sort the bounded file sample before analysis. When the directory exceeds the configured file limit, set an explicit `file_limit_reached` flag; processing every file is not required.
+- Publish CLI reports atomically through a same-directory temporary file and `os.replace()`.
+
 **Step 1: Write the failing test**
 
 ```python
@@ -457,19 +465,31 @@ class AnalyzeDirectoryTests(unittest.TestCase):
                 {
                     "hook_type": "PreToolUse",
                     "identity_candidates": [
-                        {"path": "$.thread_id", "fingerprint": "aaa", "length": 10}
+                        {
+                            "path": "$.thread_id",
+                            "fingerprint": "aaaaaaaaaaaaaaaa",
+                            "length": 10,
+                        }
                     ],
                 },
                 {
                     "hook_type": "PostToolUse",
                     "identity_candidates": [
-                        {"path": "$.thread_id", "fingerprint": "aaa", "length": 10}
+                        {
+                            "path": "$.thread_id",
+                            "fingerprint": "aaaaaaaaaaaaaaaa",
+                            "length": 10,
+                        }
                     ],
                 },
                 {
                     "hook_type": "PreToolUse",
                     "identity_candidates": [
-                        {"path": "$.thread_id", "fingerprint": "bbb", "length": 10}
+                        {
+                            "path": "$.thread_id",
+                            "fingerprint": "bbbbbbbbbbbbbbbb",
+                            "length": 10,
+                        }
                     ],
                 },
             ]
