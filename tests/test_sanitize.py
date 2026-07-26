@@ -126,6 +126,30 @@ class SummarizeEventTests(unittest.TestCase):
         self.assertIn("thread_id", summary["top_level_keys"])
         self.assertNotIn("late-stable-thread-secret", serialized)
 
+    def test_prioritizes_uppercase_identity_after_large_ordinary_prefix(self):
+        payload = {
+            f"dynamic-key-{index}": index
+            for index in range(10_000)
+        }
+        payload["THREAD_ID"] = "late-uppercase-thread-secret"
+
+        summary = summarize_event(
+            payload,
+            received_at=datetime(2026, 7, 26, 8, 3, tzinfo=timezone.utc),
+        )
+        serialized = json.dumps(summary, ensure_ascii=False)
+        identities = {
+            item["path"]: item for item in summary["identity_candidates"]
+        }
+
+        self.assertIn("$.thread_id", identities)
+        self.assertRegex(
+            identities["$.thread_id"]["fingerprint"],
+            r"^[0-9a-f]{16}$",
+        )
+        self.assertIn("thread_id", summary["top_level_keys"])
+        self.assertNotIn("late-uppercase-thread-secret", serialized)
+
     def test_hashes_unknown_keys_and_redacts_sensitive_alias_subtrees(self):
         payload = {
             "hook_type": "Stop",

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
-from itertools import islice
 from typing import Any
 
 
@@ -56,34 +55,6 @@ MAX_DEPTH = 32
 MAX_NODES = 512
 MAX_CONTAINER_ITEMS = 128
 
-PRIORITY_KEY_VARIANTS = (
-    "hook_type",
-    "hookType",
-    "type",
-    "tool_name",
-    "toolName",
-    "tool",
-    "thread_id",
-    "threadId",
-    "threadid",
-    "task_id",
-    "taskId",
-    "taskid",
-    "conversation_id",
-    "conversationId",
-    "conversationid",
-    "session_id",
-    "sessionId",
-    "sessionid",
-    "turn_id",
-    "turnId",
-    "turnid",
-    "cwd",
-    "project_id",
-    "projectId",
-    "projectid",
-)
-
 
 def _kind(value: Any) -> str:
     if value is None:
@@ -111,24 +82,19 @@ def _safe_key_label(key: Any) -> str:
 
 
 def _sample_dict_entries(value: dict) -> list[tuple[Any, Any]]:
-    priority_entries = [
-        (key, value[key])
-        for key in PRIORITY_KEY_VARIANTS
-        if key in value
-    ]
-    priority_keys = {key for key, _ in priority_entries}
-    remaining = MAX_CONTAINER_ITEMS - len(priority_entries)
-    ordinary_entries = list(
-        islice(
-            (
-                (key, child)
-                for key, child in value.items()
-                if key not in priority_keys
-            ),
-            remaining,
-        )
-    )
-    return priority_entries + ordinary_entries
+    priority_entries: dict[str, tuple[Any, Any]] = {}
+    ordinary_entries: list[tuple[Any, Any]] = []
+
+    for key, child in value.items():
+        normalized_key = str(key).lower()
+        if normalized_key in SAFE_KEY_PARTS:
+            priority_entries.setdefault(normalized_key, (key, child))
+        elif len(ordinary_entries) < MAX_CONTAINER_ITEMS:
+            ordinary_entries.append((key, child))
+
+    prioritized = list(priority_entries.values())
+    ordinary_limit = MAX_CONTAINER_ITEMS - len(prioritized)
+    return prioritized + ordinary_entries[:ordinary_limit]
 
 
 def _walk(
@@ -138,6 +104,7 @@ def _walk(
     identities: list[dict],
     *,
     depth: int = 0,
+    dict_entries: list[tuple[Any, Any]] | None = None,
 ) -> bool:
     if len(shape) >= MAX_NODES:
         return False
@@ -153,9 +120,13 @@ def _walk(
         return True
 
     if isinstance(value, dict):
-        entries = _sample_dict_entries(value)
+        entries = (
+            dict_entries
+            if dict_entries is not None
+            else _sample_dict_entries(value)
+        )
         entries.sort(key=lambda entry: _safe_key_label(entry[0]))
-        if len(value) > MAX_CONTAINER_ITEMS:
+        if len(value) > len(entries):
             item["truncated"] = True
         for key, child in entries:
             if len(shape) >= MAX_NODES:
@@ -220,10 +191,9 @@ def summarize_event(
     timestamp = received_at or datetime.now(timezone.utc)
     shape: list[dict] = []
     identities: list[dict] = []
-    _walk(payload, "$", shape, identities)
-    top_level_key_sample = [
-        key for key, _ in _sample_dict_entries(payload)
-    ]
+    top_level_entries = _sample_dict_entries(payload)
+    _walk(payload, "$", shape, identities, dict_entries=top_level_entries)
+    top_level_key_sample = [key for key, _ in top_level_entries]
 
     hook_type = payload.get("hook_type", payload.get("type", "unknown"))
     tool_name = payload.get("tool_name", payload.get("tool", ""))
@@ -236,7 +206,7 @@ def summarize_event(
         "top_level_keys": sorted(
             _safe_key_label(key) for key in top_level_key_sample
         ),
-        "top_level_keys_truncated": len(payload) > MAX_CONTAINER_ITEMS,
+        "top_level_keys_truncated": len(payload) > len(top_level_entries),
         "identity_candidates": identities,
         "shape": shape,
     }
