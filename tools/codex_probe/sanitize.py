@@ -56,6 +56,34 @@ MAX_DEPTH = 32
 MAX_NODES = 512
 MAX_CONTAINER_ITEMS = 128
 
+PRIORITY_KEY_VARIANTS = (
+    "hook_type",
+    "hookType",
+    "type",
+    "tool_name",
+    "toolName",
+    "tool",
+    "thread_id",
+    "threadId",
+    "threadid",
+    "task_id",
+    "taskId",
+    "taskid",
+    "conversation_id",
+    "conversationId",
+    "conversationid",
+    "session_id",
+    "sessionId",
+    "sessionid",
+    "turn_id",
+    "turnId",
+    "turnid",
+    "cwd",
+    "project_id",
+    "projectId",
+    "projectid",
+)
+
 
 def _kind(value: Any) -> str:
     if value is None:
@@ -82,6 +110,27 @@ def _safe_key_label(key: Any) -> str:
     return f"key_{_fingerprint(str(key))}"
 
 
+def _sample_dict_entries(value: dict) -> list[tuple[Any, Any]]:
+    priority_entries = [
+        (key, value[key])
+        for key in PRIORITY_KEY_VARIANTS
+        if key in value
+    ]
+    priority_keys = {key for key, _ in priority_entries}
+    remaining = MAX_CONTAINER_ITEMS - len(priority_entries)
+    ordinary_entries = list(
+        islice(
+            (
+                (key, child)
+                for key, child in value.items()
+                if key not in priority_keys
+            ),
+            remaining,
+        )
+    )
+    return priority_entries + ordinary_entries
+
+
 def _walk(
     value: Any,
     path: str,
@@ -104,7 +153,7 @@ def _walk(
         return True
 
     if isinstance(value, dict):
-        entries = list(islice(value.items(), MAX_CONTAINER_ITEMS))
+        entries = _sample_dict_entries(value)
         entries.sort(key=lambda entry: _safe_key_label(entry[0]))
         if len(value) > MAX_CONTAINER_ITEMS:
             item["truncated"] = True
@@ -172,7 +221,9 @@ def summarize_event(
     shape: list[dict] = []
     identities: list[dict] = []
     _walk(payload, "$", shape, identities)
-    top_level_key_sample = list(islice(payload, MAX_CONTAINER_ITEMS))
+    top_level_key_sample = [
+        key for key, _ in _sample_dict_entries(payload)
+    ]
 
     hook_type = payload.get("hook_type", payload.get("type", "unknown"))
     tool_name = payload.get("tool_name", payload.get("tool", ""))
