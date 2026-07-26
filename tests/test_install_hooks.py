@@ -4,7 +4,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from tools.codex_probe import install_hooks
 from tools.codex_probe.install_hooks import EVENT_NAMES, merge_hooks
 
 
@@ -125,6 +127,78 @@ class InstallerCliTests(unittest.TestCase):
                     for hook in entry.get("hooks", [])
                 ]
                 self.assertEqual(commands.count("python probe.py"), 1)
+
+    def test_apply_aborts_if_config_changes_while_backup_is_created(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "hooks.json"
+            original = b'{"hooks": {}}\n'
+            concurrent = b'{"changed": "by another process"}\n'
+            config_path.write_bytes(original)
+            create_backup = install_hooks._create_backup
+
+            def create_backup_then_mutate(path: Path, content: bytes) -> Path:
+                backup = create_backup(path, content)
+                path.write_bytes(concurrent)
+                return backup
+
+            with mock.patch.object(
+                install_hooks,
+                "_create_backup",
+                side_effect=create_backup_then_mutate,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changed"):
+                    install_hooks.apply_hooks(
+                        config_path,
+                        original,
+                        '{"hooks": {"Stop": []}}\n',
+                    )
+
+            self.assertEqual(config_path.read_bytes(), concurrent)
+            backups = list(config_path.parent.glob("hooks.json.bak.*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), original)
+
+    def test_rejects_symlink_without_changing_target_or_replacing_link(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "real-hooks.json"
+            link = root / "hooks.json"
+            original = b'{"hooks": {}}\n'
+            target.write_bytes(original)
+            try:
+                link.symlink_to(target)
+            except OSError as error:
+                self.skipTest(f"Symbolic links are unavailable: {error}")
+
+            result = self._run_installer(link, "python probe.py", apply=True)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual(list(root.glob("hooks.json.bak.*")), [])
+
+
+class AtomicBackupTests(unittest.TestCase):
+    def test_replace_failure_leaves_no_partial_backup_or_temporary_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "hooks.json"
+            original = b'{"hooks": {}}\n'
+            config_path.write_bytes(original)
+
+            with mock.patch.object(
+                install_hooks.os,
+                "replace",
+                side_effect=OSError("simulated replacement failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "simulated replacement failure"):
+                    install_hooks._create_backup(config_path, original)
+
+            self.assertEqual(list(root.glob("hooks.json.bak.*")), [])
+            self.assertEqual(
+                [path for path in root.iterdir() if path != config_path],
+                [],
+            )
 
 
 if __name__ == "__main__":
