@@ -858,6 +858,47 @@ Expected: a new non-empty backup and all original plus new hook groups.
 
 Do not commit files outside the repository.
 
+## Task 5A: Reconcile the probe with the verified Codex hook wire format
+
+The first trusted desktop capture proved that hooks run, but also disproved two
+planning assumptions:
+
+- Codex sends the lifecycle name as `hook_event_name`, not `hook_type`.
+- The current lifecycle includes `SessionStart`, `SessionEnd`,
+  `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`,
+  `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`, and `Stop`;
+  `Notification` is not a current lifecycle-hook event.
+
+The capture also produced two distinct `session_id` fingerprints concurrently,
+so the multi-task identity gate remains viable.
+
+**Files:**
+
+- Modify: `tools/codex_probe/sanitize.py`
+- Modify: `tools/codex_probe/analyze.py`
+- Modify: `tools/codex_probe/install_hooks.py`
+- Create: `tools/codex_probe/events.py`
+- Modify: `tests/test_sanitize.py`
+- Modify: `tests/test_analyze.py`
+- Modify: `tests/test_install_hooks.py`
+
+**TDD requirements:**
+
+1. Add failing tests for `hook_event_name` extraction and all eleven supported
+   lifecycle events. Define the event set once in a shared module used by the
+   sanitizer, analyzer, and installer.
+2. Add failing installer tests for adding the current event set and removing
+   only this probe command from the retired `Notification` group.
+3. Add an explicit, repeatable command-removal option. Use it to remove the
+   user-approved retired command
+   `python D:/Project/claude-indicator/hooks/claude_hook.py` without touching
+   any unrelated hook.
+4. Preserve all unrelated and non-selected hook commands byte-for-byte at the
+   data level.
+5. Run targeted tests, then the full test suite.
+6. Pass independent specification and code-quality review before applying the
+   corrected configuration.
+
 ## Task 6: Capture a single-task lifecycle
 
 **Files:**

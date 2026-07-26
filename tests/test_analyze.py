@@ -27,6 +27,45 @@ def write_event(root: Path, filename: str, event: object) -> None:
 
 
 class AnalyzeDirectoryTests(unittest.TestCase):
+    def test_accepts_current_lifecycle_events_and_rejects_notification(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current_events = (
+                "SessionStart",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PermissionRequest",
+                "PostToolUse",
+                "PreCompact",
+                "PostCompact",
+                "SubagentStart",
+                "SubagentStop",
+                "Stop",
+                "SessionEnd",
+            )
+            for index, hook_type in enumerate(current_events):
+                write_event(
+                    root,
+                    f"{index}.json",
+                    {"hook_type": hook_type, "identity_candidates": []},
+                )
+            write_event(
+                root,
+                "retired.json",
+                {"hook_type": "Notification", "identity_candidates": []},
+            )
+
+            report = analyze_directory(root)
+
+            self.assertEqual(
+                report["hook_types"],
+                {
+                    **{hook_type: 1 for hook_type in current_events},
+                    "unknown": 1,
+                },
+            )
+            self.assertEqual(report["invalid_records"]["hook_types"], 1)
+
     def test_groups_identity_fingerprints_by_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

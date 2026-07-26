@@ -7,6 +7,47 @@ from tools.codex_probe.sanitize import summarize_event
 
 
 class SummarizeEventTests(unittest.TestCase):
+    def test_accepts_compaction_and_subagent_lifecycle_events(self):
+        for hook_event_name in (
+            "PreCompact",
+            "PostCompact",
+            "SubagentStart",
+            "SubagentStop",
+        ):
+            with self.subTest(hook_event_name=hook_event_name):
+                summary = summarize_event(
+                    {"hook_event_name": hook_event_name},
+                    received_at=datetime(
+                        2026,
+                        7,
+                        26,
+                        7,
+                        58,
+                        tzinfo=timezone.utc,
+                    ),
+                )
+
+                self.assertEqual(summary["hook_type"], hook_event_name)
+
+    def test_uses_verified_hook_event_name_without_exposing_unknown_values(self):
+        known = summarize_event(
+            {
+                "hook_event_name": "SessionStart",
+                "hook_type": "Stop",
+            },
+            received_at=datetime(2026, 7, 26, 7, 59, tzinfo=timezone.utc),
+        )
+        unknown = summarize_event(
+            {"hook_event_name": "PRIVATE_LIFECYCLE_SECRET"},
+            received_at=datetime(2026, 7, 26, 7, 59, tzinfo=timezone.utc),
+        )
+        serialized_unknown = json.dumps(unknown, ensure_ascii=False)
+
+        self.assertEqual(known["hook_type"], "SessionStart")
+        self.assertIn("hook_event_name", known["top_level_keys"])
+        self.assertEqual(unknown["hook_type"], "unknown")
+        self.assertNotIn("PRIVATE_LIFECYCLE_SECRET", serialized_unknown)
+
     def test_redacts_values_and_fingerprints_candidate_ids(self):
         payload = {
             "hook_type": "PreToolUse",

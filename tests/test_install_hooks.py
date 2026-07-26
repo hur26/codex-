@@ -11,6 +11,170 @@ from tools.codex_probe.install_hooks import EVENT_NAMES, merge_hooks
 
 
 class MergeHooksTests(unittest.TestCase):
+    def test_explicit_removal_is_exact_cross_event_and_idempotent(self):
+        removed_command = (
+            "python D:/Project/claude-indicator/hooks/claude_hook.py"
+        )
+        keep_command = f"{removed_command} --keep"
+        companion = {"type": "command", "command": "python companion.py"}
+        existing = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {"type": "command", "command": removed_command},
+                            companion,
+                        ],
+                    }
+                ],
+                "Stop": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": removed_command},
+                        ]
+                    },
+                    {
+                        "hooks": [
+                            {"type": "command", "command": keep_command},
+                        ]
+                    },
+                ],
+                "UnrelatedEvent": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": removed_command},
+                        ],
+                    }
+                ],
+            }
+        }
+
+        first = merge_hooks(
+            existing,
+            "python halo-probe.py",
+            remove_commands=(removed_command,),
+        )
+        second = merge_hooks(
+            first,
+            "python halo-probe.py",
+            remove_commands=(removed_command,),
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            first["hooks"]["PreToolUse"][0]["hooks"][0],
+            companion,
+        )
+        self.assertEqual(
+            first["hooks"]["Stop"][0]["hooks"][0]["command"],
+            keep_command,
+        )
+        self.assertNotIn("UnrelatedEvent", first["hooks"])
+        serialized = json.dumps(first)
+        self.assertNotIn(f'"command": "{removed_command}"', serialized)
+        self.assertIn(keep_command, serialized)
+
+    def test_installs_current_events_and_only_removes_same_probe_from_notification(
+        self,
+    ):
+        command = "python halo-probe.py"
+        old_indicator = {"type": "command", "command": "python old-indicator.py"}
+        unrelated_notification = {
+            "matcher": "permission_prompt",
+            "hooks": [old_indicator, {"type": "url", "url": "http://localhost"}],
+            "custom": {"preserve": True},
+        }
+        existing = {
+            "custom": "preserved",
+            "hooks": {
+                "Notification": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {"type": "command", "command": command},
+                            old_indicator,
+                        ],
+                        "custom": "keep",
+                    },
+                    unrelated_notification,
+                    {
+                        "hooks": [
+                            {"type": "command", "command": command},
+                        ]
+                    },
+                ],
+                "Stop": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "python legacy.py"}
+                        ]
+                    }
+                ],
+            },
+        }
+
+        merged = merge_hooks(existing, command)
+
+        self.assertEqual(
+            EVENT_NAMES,
+            (
+                "SessionStart",
+                "SessionEnd",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PermissionRequest",
+                "PostToolUse",
+                "PreCompact",
+                "PostCompact",
+                "SubagentStart",
+                "SubagentStop",
+                "Stop",
+            ),
+        )
+        self.assertEqual(existing["custom"], merged["custom"])
+        self.assertEqual(
+            merged["hooks"]["Notification"],
+            [
+                {
+                    "matcher": "",
+                    "hooks": [old_indicator],
+                    "custom": "keep",
+                },
+                unrelated_notification,
+            ],
+        )
+        self.assertEqual(
+            merged["hooks"]["Stop"][0],
+            existing["hooks"]["Stop"][0],
+        )
+        for event_name in EVENT_NAMES:
+            commands = [
+                hook["command"]
+                for entry in merged["hooks"][event_name]
+                for hook in entry.get("hooks", [])
+                if hook.get("type") == "command"
+            ]
+            self.assertEqual(commands.count(command), 1)
+
+    def test_removes_empty_notification_event_after_probe_migration(self):
+        command = "python halo-probe.py"
+        existing = {
+            "hooks": {
+                "Notification": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": command},
+                        ]
+                    }
+                ]
+            }
+        }
+
+        merged = merge_hooks(existing, command)
+
+        self.assertNotIn("Notification", merged["hooks"])
+
     def test_preserves_existing_hooks_and_is_idempotent(self):
         existing = {
             "version": 1,
@@ -52,6 +216,7 @@ class InstallerCliTests(unittest.TestCase):
         command: str,
         *,
         apply: bool = False,
+        remove_commands: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess[str]:
         arguments = [
             sys.executable,
@@ -62,6 +227,8 @@ class InstallerCliTests(unittest.TestCase):
             "--command",
             command,
         ]
+        for remove_command in remove_commands:
+            arguments.extend(["--remove-command", remove_command])
         if apply:
             arguments.append("--apply")
         return subprocess.run(
@@ -70,6 +237,61 @@ class InstallerCliTests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
+    def test_cli_removal_appears_in_dry_run_and_apply(self):
+        removed_command = (
+            "python D:/Project/claude-indicator/hooks/claude_hook.py"
+        )
+        original_config = {
+            "custom": "preserved",
+            "hooks": {
+                "Stop": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": removed_command},
+                            {
+                                "type": "command",
+                                "command": "python preserved.py",
+                            },
+                        ]
+                    }
+                ]
+            },
+        }
+        original = json.dumps(original_config) + "\n"
+
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    config_path = Path(temp_dir) / "hooks.json"
+                    config_path.write_text(original, encoding="utf-8")
+
+                    result = self._run_installer(
+                        config_path,
+                        "python halo-probe.py",
+                        apply=apply,
+                        remove_commands=(removed_command,),
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if apply:
+                        merged = json.loads(
+                            config_path.read_text(encoding="utf-8")
+                        )
+                    else:
+                        merged = json.loads(result.stdout)
+                        self.assertEqual(
+                            config_path.read_text(encoding="utf-8"),
+                            original,
+                        )
+                    stop_commands = [
+                        hook["command"]
+                        for entry in merged["hooks"]["Stop"]
+                        for hook in entry.get("hooks", [])
+                        if hook.get("type") == "command"
+                    ]
+                    self.assertNotIn(removed_command, stop_commands)
+                    self.assertIn("python preserved.py", stop_commands)
 
     def test_defaults_to_dry_run_without_modifying_or_backing_up_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:

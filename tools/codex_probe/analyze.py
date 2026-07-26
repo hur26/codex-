@@ -5,10 +5,16 @@ import itertools
 import json
 import os
 import re
+import sys
 import uuid
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.codex_probe.events import HOOK_EVENT_NAMES
 
 
 MAX_FILES = 128
@@ -18,9 +24,7 @@ MAX_IDENTITY_PATHS = 64
 MAX_DISTINCT_FINGERPRINTS_PER_PATH = 64
 MAX_IDENTITY_PATH_LENGTH = 512
 
-ALLOWED_HOOK_TYPES = frozenset(
-    {"PreToolUse", "PostToolUse", "Stop", "Notification", "unknown"}
-)
+ALLOWED_HOOK_TYPES = frozenset((*HOOK_EVENT_NAMES, "unknown"))
 SAFE_PATH_LABELS = frozenset(
     {
         "args",
@@ -35,6 +39,7 @@ SAFE_PATH_LABELS = frozenset(
         "cwd",
         "env",
         "environment",
+        "hook_event_name",
         "hook_type",
         "input",
         "items",

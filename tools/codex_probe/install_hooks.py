@@ -10,8 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from tools.codex_probe.events import HOOK_EVENT_NAMES
 
-EVENT_NAMES = ("PreToolUse", "PostToolUse", "Stop", "Notification")
+EVENT_NAMES = HOOK_EVENT_NAMES
+RETIRED_EVENT_NAME = "Notification"
 
 
 class TransactionRecoveryError(RuntimeError):
@@ -35,7 +37,41 @@ def _contains_command(entries: list[Any], command: str) -> bool:
     return False
 
 
-def merge_hooks(config: dict[str, Any], command: str) -> dict[str, Any]:
+def _remove_command_handlers(
+    entries: list[Any],
+    commands: set[str],
+) -> list[Any]:
+    retained_entries: list[Any] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            retained_entries.append(entry)
+            continue
+        nested_hooks = entry.get("hooks")
+        if not isinstance(nested_hooks, list):
+            retained_entries.append(entry)
+            continue
+        retained_hooks = [
+            hook
+            for hook in nested_hooks
+            if not (
+                isinstance(hook, dict)
+                and hook.get("type") == "command"
+                and hook.get("command") in commands
+            )
+        ]
+        if not retained_hooks:
+            continue
+        entry["hooks"] = retained_hooks
+        retained_entries.append(entry)
+    return retained_entries
+
+
+def merge_hooks(
+    config: dict[str, Any],
+    command: str,
+    *,
+    remove_commands: tuple[str, ...] = (),
+) -> dict[str, Any]:
     """Return a copy of *config* with the probe command installed once per event."""
     if not isinstance(config, dict):
         raise ValueError("Hook configuration must be a JSON object")
@@ -46,6 +82,25 @@ def merge_hooks(config: dict[str, Any], command: str) -> dict[str, Any]:
     hooks = result.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         raise ValueError("The 'hooks' value must be a JSON object")
+
+    explicit_removals = set(remove_commands)
+    if any(not item for item in explicit_removals):
+        raise ValueError("Commands to remove must not be empty")
+
+    for event_name in list(hooks):
+        entries = hooks[event_name]
+        if not isinstance(entries, list):
+            continue
+        removals = set(explicit_removals)
+        if event_name == RETIRED_EVENT_NAME:
+            removals.add(command)
+        if not removals:
+            continue
+        retained_entries = _remove_command_handlers(entries, removals)
+        if retained_entries:
+            hooks[event_name] = retained_entries
+        else:
+            del hooks[event_name]
 
     for event_name in EVENT_NAMES:
         entries = hooks.setdefault(event_name, [])
@@ -294,6 +349,14 @@ def main() -> int:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--command", required=True)
     parser.add_argument(
+        "--remove-command",
+        action="append",
+        default=[],
+        help=(
+            "Remove an exact command handler from every event; may be repeated."
+        ),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="Back up and update the configuration (default: preview only).",
@@ -303,7 +366,11 @@ def main() -> int:
     recover_incomplete_transaction(args.config, apply=args.apply)
     original = _read_config_bytes(args.config)
     current = json.loads(original.decode("utf-8"))
-    merged = merge_hooks(current, args.command)
+    merged = merge_hooks(
+        current,
+        args.command,
+        remove_commands=tuple(args.remove_command),
+    )
     rendered = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
 
     if not args.apply:

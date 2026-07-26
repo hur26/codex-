@@ -4,6 +4,8 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
+from tools.codex_probe.events import HOOK_EVENT_NAMES
+
 
 IDENTITY_KEY_PARTS = {
     "thread_id",
@@ -43,6 +45,7 @@ SENSITIVE_KEY_PARTS = {
 }
 
 SAFE_KEY_PARTS = IDENTITY_KEY_PARTS | SENSITIVE_KEY_PARTS | {
+    "hook_event_name",
     "hook_type",
     "items",
     "nested",
@@ -195,13 +198,20 @@ def summarize_event(
     _walk(payload, "$", shape, identities, dict_entries=top_level_entries)
     top_level_key_sample = [key for key, _ in top_level_entries]
 
-    hook_type = payload.get("hook_type", payload.get("type", "unknown"))
+    hook_type = "unknown"
+    for key in ("hook_event_name", "hook_type", "type"):
+        if key not in payload:
+            continue
+        candidate = payload[key]
+        if isinstance(candidate, str) and candidate in HOOK_EVENT_NAMES:
+            hook_type = candidate
+        break
     tool_name = payload.get("tool_name", payload.get("tool", ""))
 
     return {
         "schema_version": 1,
         "received_at": timestamp.isoformat(),
-        "hook_type": hook_type if isinstance(hook_type, str) else "unknown",
+        "hook_type": hook_type,
         "tool_name": tool_name if isinstance(tool_name, str) else "",
         "top_level_keys": sorted(
             _safe_key_label(key) for key in top_level_key_sample
