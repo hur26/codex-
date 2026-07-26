@@ -129,6 +129,24 @@ class AnalyzeDirectoryTests(unittest.TestCase):
             ):
                 self.assertNotIn(secret, serialized)
 
+    def test_rejects_unrecognized_hook_type_without_leaking_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_event(
+                root,
+                "secret-hook.json",
+                {
+                    "hook_type": "OPENAI_API_KEY_SECRET123",
+                    "identity_candidates": [],
+                },
+            )
+
+            report = analyze_directory(root)
+            serialized = json.dumps(report)
+
+            self.assertEqual(report["hook_types"], {"unknown": 1})
+            self.assertNotIn("OPENAI_API_KEY_SECRET123", serialized)
+
     def test_ignores_malformed_candidate_structures(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

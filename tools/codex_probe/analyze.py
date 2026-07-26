@@ -16,9 +16,11 @@ MAX_FILE_BYTES = 1024 * 1024
 MAX_CANDIDATES_PER_EVENT = 128
 MAX_IDENTITY_PATHS = 64
 MAX_DISTINCT_FINGERPRINTS_PER_PATH = 64
-MAX_HOOK_TYPE_LENGTH = 64
 MAX_IDENTITY_PATH_LENGTH = 512
 
+ALLOWED_HOOK_TYPES = frozenset(
+    {"PreToolUse", "PostToolUse", "Stop", "Notification", "unknown"}
+)
 SAFE_PATH_LABELS = frozenset(
     {
         "args",
@@ -61,18 +63,13 @@ SAFE_PATH_LABELS = frozenset(
     }
 )
 
-_HOOK_TYPE_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]*")
 _HASHED_PATH_LABEL_PATTERN = re.compile(r"key_[0-9a-f]{16}")
 _LIST_INDEX_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)")
 _FINGERPRINT_PATTERN = re.compile(r"[0-9a-f]{16}")
 
 
 def _safe_hook_type(value: Any) -> str:
-    if (
-        isinstance(value, str)
-        and len(value) <= MAX_HOOK_TYPE_LENGTH
-        and _HOOK_TYPE_PATTERN.fullmatch(value)
-    ):
+    if isinstance(value, str) and value in ALLOWED_HOOK_TYPES:
         return value
     return "unknown"
 
