@@ -11,6 +11,173 @@ from tools.codex_probe.install_hooks import EVENT_NAMES, merge_hooks
 
 
 class MergeHooksTests(unittest.TestCase):
+    def test_exclusion_preserves_an_already_empty_event(self):
+        existing = {"hooks": {"SessionEnd": []}}
+
+        merged = merge_hooks(
+            existing,
+            "python halo-probe.py",
+            exclude_events=("SessionEnd",),
+        )
+
+        self.assertIn("SessionEnd", merged["hooks"])
+        self.assertEqual(merged["hooks"]["SessionEnd"], [])
+
+    def test_missing_explicit_removal_preserves_empty_unrelated_event(self):
+        existing = {"hooks": {"UnrelatedEvent": []}}
+
+        merged = merge_hooks(
+            existing,
+            "python halo-probe.py",
+            remove_commands=("python missing.py",),
+        )
+
+        self.assertIn("UnrelatedEvent", merged["hooks"])
+        self.assertEqual(merged["hooks"]["UnrelatedEvent"], [])
+
+    def test_exclusion_preserves_unmatched_empty_groups_and_event(self):
+        empty_group = {"hooks": []}
+        decorated_empty_group = {
+            "matcher": "session",
+            "custom": {"preserve": True},
+            "hooks": [],
+        }
+        existing = {
+            "hooks": {
+                "SessionEnd": [
+                    empty_group,
+                    decorated_empty_group,
+                ]
+            }
+        }
+
+        merged = merge_hooks(
+            existing,
+            "python halo-probe.py",
+            exclude_events=("SessionEnd",),
+        )
+
+        self.assertEqual(
+            merged["hooks"]["SessionEnd"],
+            [empty_group, decorated_empty_group],
+        )
+
+    def test_missing_explicit_removal_preserves_unrelated_empty_group(self):
+        empty_group = {
+            "matcher": "custom",
+            "custom": "preserved",
+            "hooks": [],
+        }
+        existing = {"hooks": {"UnrelatedEvent": [empty_group]}}
+
+        merged = merge_hooks(
+            existing,
+            "python halo-probe.py",
+            remove_commands=("python missing.py",),
+        )
+
+        self.assertEqual(
+            merged["hooks"]["UnrelatedEvent"],
+            [empty_group],
+        )
+
+    def test_exclusion_removes_only_exact_current_command_and_is_idempotent(
+        self,
+    ):
+        command = "python halo-probe.py"
+        similar_command = f"{command} --keep"
+        companion = {"type": "url", "url": "http://localhost"}
+        existing = {
+            "hooks": {
+                "SessionEnd": [
+                    {
+                        "custom": "preserved",
+                        "hooks": [
+                            {"type": "command", "command": command},
+                            {"type": "command", "command": similar_command},
+                            companion,
+                        ],
+                    },
+                    {
+                        "hooks": [
+                            {"type": "command", "command": command},
+                        ]
+                    },
+                ],
+                "Stop": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": command},
+                        ]
+                    }
+                ],
+            }
+        }
+
+        first = merge_hooks(
+            existing,
+            command,
+            exclude_events=("SessionEnd", "SessionEnd"),
+        )
+        second = merge_hooks(
+            first,
+            command,
+            exclude_events=("SessionEnd",),
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            first["hooks"]["SessionEnd"],
+            [
+                {
+                    "custom": "preserved",
+                    "hooks": [
+                        {"type": "command", "command": similar_command},
+                        companion,
+                    ],
+                }
+            ],
+        )
+        stop_commands = [
+            hook["command"]
+            for entry in first["hooks"]["Stop"]
+            for hook in entry.get("hooks", [])
+            if hook.get("type") == "command"
+        ]
+        self.assertEqual(stop_commands.count(command), 1)
+
+    def test_exclusion_removes_event_when_only_current_command_remains(self):
+        command = "python halo-probe.py"
+        existing = {
+            "hooks": {
+                "SessionEnd": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": command},
+                        ]
+                    }
+                ]
+            }
+        }
+
+        merged = merge_hooks(
+            existing,
+            command,
+            exclude_events=("SessionEnd",),
+        )
+
+        self.assertNotIn("SessionEnd", merged["hooks"])
+
+    def test_rejects_empty_or_unknown_excluded_events(self):
+        for excluded_event in ("", "UnknownEvent"):
+            with self.subTest(excluded_event=excluded_event):
+                with self.assertRaisesRegex(ValueError, "lifecycle event"):
+                    merge_hooks(
+                        {"hooks": {}},
+                        "python halo-probe.py",
+                        exclude_events=(excluded_event,),
+                    )
+
     def test_explicit_removal_is_exact_cross_event_and_idempotent(self):
         removed_command = (
             "python D:/Project/claude-indicator/hooks/claude_hook.py"
@@ -217,6 +384,7 @@ class InstallerCliTests(unittest.TestCase):
         *,
         apply: bool = False,
         remove_commands: tuple[str, ...] = (),
+        exclude_events: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess[str]:
         arguments = [
             sys.executable,
@@ -229,6 +397,8 @@ class InstallerCliTests(unittest.TestCase):
         ]
         for remove_command in remove_commands:
             arguments.extend(["--remove-command", remove_command])
+        for exclude_event in exclude_events:
+            arguments.extend(["--exclude-event", exclude_event])
         if apply:
             arguments.append("--apply")
         return subprocess.run(
@@ -237,6 +407,100 @@ class InstallerCliTests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
+    def test_cli_exclusion_works_in_dry_run_and_apply(self):
+        command = "python halo-probe.py"
+        preserved = {"type": "command", "command": "python preserved.py"}
+        original_config = {
+            "custom": "preserved",
+            "hooks": {
+                "SessionEnd": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": command},
+                            preserved,
+                        ]
+                    }
+                ]
+            },
+        }
+        original = json.dumps(original_config) + "\n"
+
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    config_path = Path(temp_dir) / "hooks.json"
+                    config_path.write_text(original, encoding="utf-8")
+
+                    result = self._run_installer(
+                        config_path,
+                        command,
+                        apply=apply,
+                        exclude_events=("SessionEnd", "SessionEnd"),
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if apply:
+                        merged = json.loads(
+                            config_path.read_text(encoding="utf-8")
+                        )
+                        backups = list(
+                            config_path.parent.glob("hooks.json.bak.*")
+                        )
+                        self.assertEqual(len(backups), 1)
+                        self.assertEqual(
+                            backups[0].read_text(encoding="utf-8"),
+                            original,
+                        )
+                    else:
+                        merged = json.loads(result.stdout)
+                        self.assertEqual(
+                            config_path.read_text(encoding="utf-8"),
+                            original,
+                        )
+                        self.assertEqual(
+                            list(
+                                config_path.parent.glob("hooks.json.bak.*")
+                            ),
+                            [],
+                        )
+                    self.assertEqual(
+                        merged["hooks"]["SessionEnd"],
+                        [{"hooks": [preserved]}],
+                    )
+
+    def test_cli_rejects_invalid_exclusions_without_writing_or_backup(self):
+        original = '{"custom": "preserved", "hooks": {}}\n'
+
+        for apply in (False, True):
+            for excluded_event in ("", "UnknownEvent"):
+                with self.subTest(
+                    apply=apply,
+                    excluded_event=excluded_event,
+                ):
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        config_path = Path(temp_dir) / "hooks.json"
+                        config_path.write_text(original, encoding="utf-8")
+
+                        result = self._run_installer(
+                            config_path,
+                            "python halo-probe.py",
+                            apply=apply,
+                            exclude_events=(excluded_event,),
+                        )
+
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("lifecycle event", result.stderr)
+                        self.assertEqual(
+                            config_path.read_text(encoding="utf-8"),
+                            original,
+                        )
+                        self.assertEqual(
+                            list(
+                                config_path.parent.glob("hooks.json.bak.*")
+                            ),
+                            [],
+                        )
 
     def test_cli_removal_appears_in_dry_run_and_apply(self):
         removed_command = (

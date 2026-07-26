@@ -40,8 +40,9 @@ def _contains_command(entries: list[Any], command: str) -> bool:
 def _remove_command_handlers(
     entries: list[Any],
     commands: set[str],
-) -> list[Any]:
+) -> tuple[list[Any], bool]:
     retained_entries: list[Any] = []
+    removed_any = False
     for entry in entries:
         if not isinstance(entry, dict):
             retained_entries.append(entry)
@@ -50,20 +51,41 @@ def _remove_command_handlers(
         if not isinstance(nested_hooks, list):
             retained_entries.append(entry)
             continue
-        retained_hooks = [
-            hook
-            for hook in nested_hooks
-            if not (
+        removed_target = False
+        retained_hooks: list[Any] = []
+        for hook in nested_hooks:
+            if (
                 isinstance(hook, dict)
                 and hook.get("type") == "command"
                 and hook.get("command") in commands
-            )
-        ]
-        if not retained_hooks:
+            ):
+                removed_target = True
+                removed_any = True
+            else:
+                retained_hooks.append(hook)
+        if removed_target and not retained_hooks:
             continue
-        entry["hooks"] = retained_hooks
+        if removed_target:
+            entry["hooks"] = retained_hooks
         retained_entries.append(entry)
-    return retained_entries
+    return retained_entries, removed_any
+
+
+def _validate_excluded_events(exclude_events: tuple[str, ...]) -> set[str]:
+    excluded = set(exclude_events)
+    invalid = [event for event in excluded if event not in EVENT_NAMES]
+    if invalid:
+        rendered = ", ".join(repr(event) for event in sorted(invalid))
+        raise ValueError(f"Unknown or empty lifecycle event: {rendered}")
+    return excluded
+
+
+def _parse_event_name(value: str) -> str:
+    try:
+        _validate_excluded_events((value,))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    return value
 
 
 def merge_hooks(
@@ -71,8 +93,9 @@ def merge_hooks(
     command: str,
     *,
     remove_commands: tuple[str, ...] = (),
+    exclude_events: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Return a copy of *config* with the probe command installed once per event."""
+    """Install the probe once per non-excluded event in a copy of *config*."""
     if not isinstance(config, dict):
         raise ValueError("Hook configuration must be a JSON object")
     if not command:
@@ -86,6 +109,11 @@ def merge_hooks(
     explicit_removals = set(remove_commands)
     if any(not item for item in explicit_removals):
         raise ValueError("Commands to remove must not be empty")
+    excluded_events = _validate_excluded_events(exclude_events)
+
+    for event_name in EVENT_NAMES:
+        if event_name in hooks and not isinstance(hooks[event_name], list):
+            raise ValueError(f"The hooks for {event_name} must be a JSON array")
 
     for event_name in list(hooks):
         entries = hooks[event_name]
@@ -94,15 +122,23 @@ def merge_hooks(
         removals = set(explicit_removals)
         if event_name == RETIRED_EVENT_NAME:
             removals.add(command)
+        if event_name in excluded_events:
+            removals.add(command)
         if not removals:
             continue
-        retained_entries = _remove_command_handlers(entries, removals)
-        if retained_entries:
-            hooks[event_name] = retained_entries
-        else:
-            del hooks[event_name]
+        retained_entries, removed_any = _remove_command_handlers(
+            entries,
+            removals,
+        )
+        if removed_any:
+            if retained_entries:
+                hooks[event_name] = retained_entries
+            else:
+                del hooks[event_name]
 
     for event_name in EVENT_NAMES:
+        if event_name in excluded_events:
+            continue
         entries = hooks.setdefault(event_name, [])
         if not isinstance(entries, list):
             raise ValueError(f"The hooks for {event_name} must be a JSON array")
@@ -357,6 +393,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--exclude-event",
+        action="append",
+        default=[],
+        type=_parse_event_name,
+        help=(
+            "Do not install the current command for this lifecycle event; "
+            "may be repeated."
+        ),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="Back up and update the configuration (default: preview only).",
@@ -370,6 +416,7 @@ def main() -> int:
         current,
         args.command,
         remove_commands=tuple(args.remove_command),
+        exclude_events=tuple(args.exclude_event),
     )
     rendered = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
 

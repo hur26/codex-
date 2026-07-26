@@ -899,6 +899,33 @@ so the multi-task identity gate remains viable.
 6. Pass independent specification and code-quality review before applying the
    corrected configuration.
 
+## Task 5B: Handle a desktop approval blind spot
+
+On Codex desktop `26.721.3996.0`, the trusted-hook state contains every
+configured lifecycle event except `SessionEnd`. The Hook browser does not show
+that event, while its badge still reports one unapproved item.
+
+`SessionEnd` is not required for live task-state detection because `Stop`
+provides turn completion. Keep `SessionEnd` in the shared parser/analyzer
+allowlist, but allow the installer to omit this Halo handler on affected
+clients.
+
+**Files:**
+
+- Modify: `tools/codex_probe/install_hooks.py`
+- Modify: `tests/test_install_hooks.py`
+
+**TDD requirements:**
+
+1. Add a repeatable `--exclude-event` option restricted to known lifecycle
+   event names.
+2. Exclusion removes only the current Halo command from that event and
+   preserves unrelated handlers in the same event.
+3. Invalid or empty event names fail without writing.
+4. Dry-run, apply, idempotency, exact backup, and transaction safety remain
+   unchanged.
+5. Apply locally with `--exclude-event SessionEnd` after review.
+
 ## Task 6: Capture a single-task lifecycle
 
 **Files:**
