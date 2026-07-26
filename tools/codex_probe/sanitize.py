@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
+from itertools import islice
 from typing import Any
 
 
@@ -103,14 +104,14 @@ def _walk(
         return True
 
     if isinstance(value, dict):
-        keys = sorted(value, key=_safe_key_label)
-        if len(keys) > MAX_CONTAINER_ITEMS:
+        entries = list(islice(value.items(), MAX_CONTAINER_ITEMS))
+        entries.sort(key=lambda entry: _safe_key_label(entry[0]))
+        if len(value) > MAX_CONTAINER_ITEMS:
             item["truncated"] = True
-        for key in keys[:MAX_CONTAINER_ITEMS]:
+        for key, child in entries:
             if len(shape) >= MAX_NODES:
                 item["truncated"] = True
                 break
-            child = value[key]
             normalized_key = str(key).lower()
             child_path = f"{path}.{_safe_key_label(key)}"
             if normalized_key in SENSITIVE_KEY_PARTS:
@@ -171,6 +172,7 @@ def summarize_event(
     shape: list[dict] = []
     identities: list[dict] = []
     _walk(payload, "$", shape, identities)
+    top_level_key_sample = list(islice(payload, MAX_CONTAINER_ITEMS))
 
     hook_type = payload.get("hook_type", payload.get("type", "unknown"))
     tool_name = payload.get("tool_name", payload.get("tool", ""))
@@ -180,7 +182,10 @@ def summarize_event(
         "received_at": timestamp.isoformat(),
         "hook_type": hook_type if isinstance(hook_type, str) else "unknown",
         "tool_name": tool_name if isinstance(tool_name, str) else "",
-        "top_level_keys": sorted(_safe_key_label(key) for key in payload),
+        "top_level_keys": sorted(
+            _safe_key_label(key) for key in top_level_key_sample
+        ),
+        "top_level_keys_truncated": len(payload) > MAX_CONTAINER_ITEMS,
         "identity_candidates": identities,
         "shape": shape,
     }

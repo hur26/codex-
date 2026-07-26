@@ -1,3 +1,4 @@
+import hashlib
 import json
 import unittest
 from datetime import datetime, timezone
@@ -79,6 +80,27 @@ class SummarizeEventTests(unittest.TestCase):
         self.assertLessEqual(len(summary["shape"]), 512)
         items = next(item for item in summary["shape"] if item["path"] == "$.items")
         self.assertTrue(items["truncated"])
+
+    def test_samples_large_dictionary_keys_before_sorting_or_hashing(self):
+        payload = {"hook_type": "Stop"}
+        payload.update({f"dynamic-key-{index}": index for index in range(10_000)})
+        late_key = "dynamic-key-9999"
+        late_label = (
+            "key_"
+            + hashlib.sha256(late_key.encode("utf-8")).hexdigest()[:16]
+        )
+
+        summary = summarize_event(
+            payload,
+            received_at=datetime(2026, 7, 26, 8, 3, tzinfo=timezone.utc),
+        )
+        serialized = json.dumps(summary, ensure_ascii=False)
+
+        self.assertLessEqual(len(summary["shape"]), 512)
+        self.assertLessEqual(len(summary["top_level_keys"]), 128)
+        self.assertTrue(summary["top_level_keys_truncated"])
+        self.assertNotIn(late_key, serialized)
+        self.assertNotIn(late_label, serialized)
 
     def test_hashes_unknown_keys_and_redacts_sensitive_alias_subtrees(self):
         payload = {
