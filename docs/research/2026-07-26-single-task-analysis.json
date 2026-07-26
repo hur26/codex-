@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "event_count": 16,
+  "hook_types": {
+    "PostToolUse": 6,
+    "PreToolUse": 7,
+    "Stop": 1,
+    "UserPromptSubmit": 2
+  },
+  "identity_paths": {
+    "$.cwd": {
+      "distinct_fingerprints": 1,
+      "events": 16,
+      "hook_types": {
+        "PostToolUse": 6,
+        "PreToolUse": 7,
+        "Stop": 1,
+        "UserPromptSubmit": 2
+      }
+    },
+    "$.session_id": {
+      "distinct_fingerprints": 1,
+      "events": 16,
+      "hook_types": {
+        "PostToolUse": 6,
+        "PreToolUse": 7,
+        "Stop": 1,
+        "UserPromptSubmit": 2
+      }
+    },
+    "$.turn_id": {
+      "distinct_fingerprints": 2,
+      "events": 16,
+      "hook_types": {
+        "PostToolUse": 6,
+        "PreToolUse": 7,
+        "Stop": 1,
+        "UserPromptSubmit": 2
+      }
+    }
+  },
+  "file_limit_reached": false,
+  "skipped_files": {
+    "unreadable": 0,
+    "oversized": 0,
+    "malformed": 0,
+    "non_object": 0
+  },
+  "invalid_records": {
+    "hook_types": 0,
+    "identity_candidate_containers": 0,
+    "candidates": 0,
+    "identity_paths": 0,
+    "fingerprints": 0
+  },
+  "truncated": {
+    "candidates": 0,
+    "identity_paths": 0,
+    "fingerprints": 0
+  }
+}
