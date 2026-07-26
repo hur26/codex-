@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "event_count": 76,
+  "hook_types": {
+    "PostToolUse": 35,
+    "PreToolUse": 35,
+    "SessionStart": 1,
+    "Stop": 2,
+    "UserPromptSubmit": 3
+  },
+  "identity_paths": {
+    "$.cwd": {
+      "distinct_fingerprints": 2,
+      "events": 76,
+      "hook_types": {
+        "PostToolUse": 35,
+        "PreToolUse": 35,
+        "SessionStart": 1,
+        "Stop": 2,
+        "UserPromptSubmit": 3
+      },
+      "groups": [
+        {
+          "label": "group_1",
+          "events": 47,
+          "hook_types": {
+            "PostToolUse": 22,
+            "PreToolUse": 22,
+            "Stop": 1,
+            "UserPromptSubmit": 2
+          },
+          "first_event_index": 1,
+          "last_event_index": 76
+        },
+        {
+          "label": "group_2",
+          "events": 29,
+          "hook_types": {
+            "PostToolUse": 13,
+            "PreToolUse": 13,
+            "SessionStart": 1,
+            "Stop": 1,
+            "UserPromptSubmit": 1
+          },
+          "first_event_index": 6,
+          "last_event_index": 58
+        }
+      ]
+    },
+    "$.session_id": {
+      "distinct_fingerprints": 2,
+      "events": 76,
+      "hook_types": {
+        "PostToolUse": 35,
+        "PreToolUse": 35,
+        "SessionStart": 1,
+        "Stop": 2,
+        "UserPromptSubmit": 3
+      },
+      "groups": [
+        {
+          "label": "group_1",
+          "events": 47,
+          "hook_types": {
+            "PostToolUse": 22,
+            "PreToolUse": 22,
+            "Stop": 1,
+            "UserPromptSubmit": 2
+          },
+          "first_event_index": 1,
+          "last_event_index": 76
+        },
+        {
+          "label": "group_2",
+          "events": 29,
+          "hook_types": {
+            "PostToolUse": 13,
+            "PreToolUse": 13,
+            "SessionStart": 1,
+            "Stop": 1,
+            "UserPromptSubmit": 1
+          },
+          "first_event_index": 6,
+          "last_event_index": 58
+        }
+      ]
+    },
+    "$.turn_id": {
+      "distinct_fingerprints": 4,
+      "events": 75,
+      "hook_types": {
+        "PostToolUse": 35,
+        "PreToolUse": 35,
+        "Stop": 2,
+        "UserPromptSubmit": 3
+      },
+      "groups": [
+        {
+          "label": "group_1",
+          "events": 4,
+          "hook_types": {
+            "PostToolUse": 2,
+            "PreToolUse": 1,
+            "Stop": 1
+          },
+          "first_event_index": 1,
+          "last_event_index": 4
+        },
+        {
+          "label": "group_2",
+          "events": 7,
+          "hook_types": {
+            "PostToolUse": 3,
+            "PreToolUse": 3,
+            "UserPromptSubmit": 1
+          },
+          "first_event_index": 5,
+          "last_event_index": 13
+        },
+        {
+          "label": "group_3",
+          "events": 28,
+          "hook_types": {
+            "PostToolUse": 13,
+            "PreToolUse": 13,
+            "Stop": 1,
+            "UserPromptSubmit": 1
+          },
+          "first_event_index": 7,
+          "last_event_index": 58
+        },
+        {
+          "label": "group_4",
+          "events": 36,
+          "hook_types": {
+            "PostToolUse": 17,
+            "PreToolUse": 18,
+            "UserPromptSubmit": 1
+          },
+          "first_event_index": 15,
+          "last_event_index": 76
+        }
+      ]
+    }
+  },
+  "anonymous_group_labels_comparable": true,
+  "file_limit_reached": false,
+  "skipped_files": {
+    "unreadable": 0,
+    "oversized": 0,
+    "malformed": 0,
+    "non_object": 0
+  },
+  "invalid_records": {
+    "hook_types": 0,
+    "identity_candidate_containers": 0,
+    "candidates": 0,
+    "identity_paths": 0,
+    "fingerprints": 0
+  },
+  "truncated": {
+    "candidates": 0,
+    "identity_paths": 0,
+    "fingerprints": 0
+  }
+}
