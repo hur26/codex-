@@ -149,9 +149,13 @@ impl HaloEngine {
         self.validate_slot(left)?;
         self.validate_slot(right)?;
 
+        let left_effect = self.slots[left].effect.clone();
+        let right_effect = self.slots[right].effect.clone();
         self.slots.swap(left, right);
         self.slots[left].index = left;
+        self.slots[left].effect = left_effect;
         self.slots[right].index = right;
+        self.slots[right].effect = right_effect;
         Ok(())
     }
 
@@ -305,6 +309,7 @@ impl HaloEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::effects::{Direction, EffectProfile};
     use crate::domain::model::{
         BindingMode, Confidence, NormalizedState, SignalSource, TaskKey, TaskSignal, TaskStatus,
     };
@@ -454,6 +459,60 @@ mod tests {
         assert_eq!(after.slots[1].locked, left_payload.locked);
         assert_eq!(after.slots[0].index, 0);
         assert_eq!(after.slots[1].index, 1);
+    }
+
+    #[test]
+    fn swapping_tasks_keeps_each_effect_on_its_physical_ring() {
+        let mut engine = HaloEngine::new(300_000);
+        engine.apply_signal(signal(1, TaskStatus::Running, 100));
+        engine.apply_signal(TaskSignal {
+            task_key: key(2),
+            state: NormalizedState {
+                status: TaskStatus::Failed,
+                source: SignalSource::Simulator,
+                confidence: Confidence::Simulated,
+            },
+            received_at_ms: 200,
+        });
+        engine
+            .manual_bind(&key(1), 0, true)
+            .expect("known task can be manually bound");
+        engine
+            .update_effect(
+                0,
+                EffectProfile::new(40, 75, Direction::Clockwise, 25)
+                    .expect("test effect must be valid"),
+            )
+            .expect("valid slot can be updated");
+        engine
+            .update_effect(
+                1,
+                EffectProfile::new(90, 250, Direction::CounterClockwise, 80)
+                    .expect("test effect must be valid"),
+            )
+            .expect("valid slot can be updated");
+        let before = engine.snapshot();
+
+        engine.swap_slots(0, 1).expect("valid slots can be swapped");
+
+        let after = engine.snapshot();
+        assert_eq!(after.slots[0].index, 0);
+        assert_eq!(after.slots[0].task_key, before.slots[1].task_key);
+        assert_eq!(after.slots[0].status, before.slots[1].status);
+        assert_eq!(after.slots[0].source, before.slots[1].source);
+        assert_eq!(after.slots[0].confidence, before.slots[1].confidence);
+        assert_eq!(after.slots[0].binding_mode, before.slots[1].binding_mode);
+        assert_eq!(after.slots[0].locked, before.slots[1].locked);
+        assert_eq!(after.slots[0].effect, before.slots[0].effect);
+
+        assert_eq!(after.slots[1].index, 1);
+        assert_eq!(after.slots[1].task_key, before.slots[0].task_key);
+        assert_eq!(after.slots[1].status, before.slots[0].status);
+        assert_eq!(after.slots[1].source, before.slots[0].source);
+        assert_eq!(after.slots[1].confidence, before.slots[0].confidence);
+        assert_eq!(after.slots[1].binding_mode, before.slots[0].binding_mode);
+        assert_eq!(after.slots[1].locked, before.slots[0].locked);
+        assert_eq!(after.slots[1].effect, before.slots[1].effect);
     }
 
     #[test]
