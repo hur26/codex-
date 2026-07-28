@@ -46,7 +46,7 @@ pub enum BindingMode {
     Manual,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TaskKey(String);
 
 impl TaskKey {
@@ -135,4 +135,12 @@ pub struct RingSlot {
     pub confidence: Option<Confidence>,
     pub binding_mode: BindingMode,
     pub locked: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HaloSnapshot {
+    pub slots: Vec<RingSlot>,
+    pub tasks: Vec<TaskRecord>,
+    pub queue: Vec<TaskRecord>,
 }
