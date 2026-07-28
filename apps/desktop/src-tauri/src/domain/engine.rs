@@ -16,7 +16,11 @@ pub struct HaloEngine {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "code", rename_all = "camelCase")]
+#[serde(
+    tag = "code",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum EngineError {
     SlotOutOfBounds { slot: usize },
     TaskNotFound { task_key: TaskKey },
@@ -50,6 +54,14 @@ impl HaloEngine {
     }
 
     pub fn apply_signal(&mut self, signal: TaskSignal) {
+        if self
+            .tasks
+            .get(&signal.task_key)
+            .is_some_and(|task| signal.received_at_ms < task.last_active_at_ms)
+        {
+            return;
+        }
+
         let task_key = signal.task_key;
         let task = TaskRecord {
             task_key: task_key.clone(),
@@ -460,6 +472,94 @@ mod tests {
     }
 
     #[test]
+    fn older_signal_is_completely_ignored_for_bound_and_queued_tasks() {
+        let mut engine = HaloEngine::new(300_000);
+        engine.apply_signal(signal(1, TaskStatus::Waiting, 1_000));
+        for value in 2..=4 {
+            engine.apply_signal(signal(value, TaskStatus::Running, value * 100));
+        }
+        engine.apply_signal(signal(5, TaskStatus::Waiting, 1_100));
+        let before = engine.snapshot();
+
+        engine.apply_signal(signal(1, TaskStatus::Running, 900));
+        engine.apply_signal(signal(5, TaskStatus::Running, 1_000));
+
+        assert_eq!(engine.snapshot(), before);
+    }
+
+    #[test]
+    fn queue_is_sorted_by_recent_activity_and_refresh_reorders_it() {
+        let mut engine = HaloEngine::new(300_000);
+        for value in 1..=4 {
+            engine.apply_signal(signal(value, TaskStatus::Running, value * 100));
+        }
+        engine.apply_signal(signal(5, TaskStatus::Running, 500));
+        engine.apply_signal(signal(6, TaskStatus::Waiting, 600));
+
+        assert_eq!(
+            engine
+                .snapshot()
+                .queue
+                .iter()
+                .map(|task| task.task_key.clone())
+                .collect::<Vec<_>>(),
+            vec![key(6), key(5)]
+        );
+
+        engine.apply_signal(signal(5, TaskStatus::Waiting, 700));
+
+        let queue = engine.snapshot().queue;
+        assert_eq!(queue[0].task_key, key(5));
+        assert_eq!(queue[0].last_active_at_ms, 700);
+        assert_eq!(queue[1].task_key, key(6));
+    }
+
+    #[test]
+    fn releasing_completed_slot_immediately_backfills_from_queue_head() {
+        let mut engine = HaloEngine::new(300_000);
+        engine.apply_signal(signal(1, TaskStatus::RoundCompleted, 100));
+        for value in 2..=4 {
+            engine.apply_signal(signal(value, TaskStatus::Running, value * 100));
+        }
+        engine.apply_signal(signal(5, TaskStatus::Running, 500));
+        engine.apply_signal(signal(6, TaskStatus::Waiting, 600));
+
+        engine.tick(300_100);
+
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.slots[0].task_key, Some(key(6)));
+        assert_eq!(snapshot.slots[0].status, TaskStatus::Waiting);
+        assert_eq!(snapshot.queue.len(), 1);
+        assert_eq!(snapshot.queue[0].task_key, key(5));
+    }
+
+    #[test]
+    fn manually_binding_queued_task_keeps_it_globally_unique() {
+        let mut engine = HaloEngine::new(300_000);
+        for value in 1..=5 {
+            engine.apply_signal(signal(value, TaskStatus::Running, value * 100));
+        }
+
+        engine
+            .manual_bind(&key(5), 1, true)
+            .expect("queued task can be manually bound");
+
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot
+                .slots
+                .iter()
+                .filter(|slot| slot.task_key.as_ref() == Some(&key(5)))
+                .count(),
+            1
+        );
+        assert_eq!(snapshot.slots[1].task_key, Some(key(5)));
+        assert_eq!(snapshot.slots[1].binding_mode, BindingMode::Manual);
+        assert!(snapshot.slots[1].locked);
+        assert!(snapshot.queue.iter().all(|task| task.task_key != key(5)));
+    }
+
+    #[test]
     fn invalid_slot_and_unknown_task_return_structured_errors() {
         let mut engine = HaloEngine::new(300_000);
 
@@ -474,6 +574,15 @@ mod tests {
         assert_eq!(
             engine.toggle_lock(0),
             Err(EngineError::EmptySlot { slot: 0 })
+        );
+
+        assert_eq!(
+            serde_json::to_value(EngineError::TaskNotFound { task_key: key(9) })
+                .expect("engine error must serialize"),
+            serde_json::json!({
+                "code": "taskNotFound",
+                "taskKey": "0000000000000009"
+            })
         );
     }
 }
