@@ -47,6 +47,12 @@ pub enum BindingMode {
     Manual,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DeviceMode {
+    Virtual,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TaskKey(String);
 
@@ -142,6 +148,7 @@ pub struct RingSlot {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HaloSnapshot {
+    pub device_mode: DeviceMode,
     pub global_brightness: u8,
     pub slots: Vec<RingSlot>,
     pub tasks: Vec<TaskRecord>,

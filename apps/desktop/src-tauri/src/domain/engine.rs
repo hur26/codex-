@@ -1,6 +1,6 @@
 use crate::domain::effects::{validate_global_brightness, EffectProfile, EffectValidationError};
 use crate::domain::model::{
-    BindingMode, HaloSnapshot, RingSlot, TaskKey, TaskRecord, TaskSignal, TaskStatus,
+    BindingMode, DeviceMode, HaloSnapshot, RingSlot, TaskKey, TaskRecord, TaskSignal, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -218,6 +218,7 @@ impl HaloEngine {
             .collect();
 
         HaloSnapshot {
+            device_mode: DeviceMode::Virtual,
             global_brightness: self.global_brightness,
             slots: self.slots.clone(),
             tasks,
