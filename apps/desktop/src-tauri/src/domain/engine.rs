@@ -1,3 +1,4 @@
+use crate::domain::effects::{validate_global_brightness, EffectProfile, EffectValidationError};
 use crate::domain::model::{
     BindingMode, HaloSnapshot, RingSlot, TaskKey, TaskRecord, TaskSignal, TaskStatus,
 };
@@ -10,6 +11,7 @@ const SLOT_COUNT: usize = 4;
 #[derive(Clone, Debug)]
 pub struct HaloEngine {
     round_complete_hold_ms: u64,
+    global_brightness: u8,
     tasks: HashMap<TaskKey, TaskRecord>,
     slots: Vec<RingSlot>,
     queue: Vec<TaskKey>,
@@ -25,6 +27,7 @@ pub enum EngineError {
     SlotOutOfBounds { slot: usize },
     TaskNotFound { task_key: TaskKey },
     EmptySlot { slot: usize },
+    InvalidEffect { error: EffectValidationError },
 }
 
 impl fmt::Display for EngineError {
@@ -35,6 +38,7 @@ impl fmt::Display for EngineError {
                 write!(formatter, "task {} does not exist", task_key.as_str())
             }
             Self::EmptySlot { slot } => write!(formatter, "slot {slot} is empty"),
+            Self::InvalidEffect { error } => error.fmt(formatter),
         }
     }
 }
@@ -47,6 +51,7 @@ impl HaloEngine {
 
         Self {
             round_complete_hold_ms,
+            global_brightness: 100,
             tasks: HashMap::new(),
             slots,
             queue: Vec::new(),
@@ -150,6 +155,18 @@ impl HaloEngine {
         Ok(())
     }
 
+    pub fn update_effect(&mut self, slot: usize, effect: EffectProfile) -> Result<(), EngineError> {
+        self.validate_slot(slot)?;
+        self.slots[slot].effect = effect;
+        Ok(())
+    }
+
+    pub fn set_global_brightness(&mut self, value: u8) -> Result<(), EngineError> {
+        validate_global_brightness(value).map_err(|error| EngineError::InvalidEffect { error })?;
+        self.global_brightness = value;
+        Ok(())
+    }
+
     pub fn tick(&mut self, now_ms: u64) {
         let releasable: Vec<_> = self
             .slots
@@ -197,6 +214,7 @@ impl HaloEngine {
             .collect();
 
         HaloSnapshot {
+            global_brightness: self.global_brightness,
             slots: self.slots.clone(),
             tasks,
             queue,
@@ -212,6 +230,7 @@ impl HaloEngine {
             confidence: None,
             binding_mode: BindingMode::Auto,
             locked: false,
+            effect: EffectProfile::default(),
         }
     }
 
@@ -226,19 +245,23 @@ impl HaloEngine {
             .tasks
             .get(&task_key)
             .expect("binding is only called for known tasks");
-        self.slots[slot] = RingSlot {
-            index: slot,
-            task_key: Some(task_key),
-            status: task.status,
-            source: Some(task.source),
-            confidence: Some(task.confidence),
-            binding_mode,
-            locked,
-        };
+        let slot = &mut self.slots[slot];
+        slot.task_key = Some(task_key);
+        slot.status = task.status;
+        slot.source = Some(task.source);
+        slot.confidence = Some(task.confidence);
+        slot.binding_mode = binding_mode;
+        slot.locked = locked;
     }
 
     fn clear_slot(&mut self, slot: usize) {
-        self.slots[slot] = Self::empty_slot(slot);
+        let slot = &mut self.slots[slot];
+        slot.task_key = None;
+        slot.status = TaskStatus::Idle;
+        slot.source = None;
+        slot.confidence = None;
+        slot.binding_mode = BindingMode::Auto;
+        slot.locked = false;
     }
 
     fn enqueue_recent(&mut self, task_key: TaskKey) {

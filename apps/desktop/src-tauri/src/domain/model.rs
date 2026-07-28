@@ -1,3 +1,4 @@
+use crate::domain::effects::EffectProfile;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
@@ -135,11 +136,13 @@ pub struct RingSlot {
     pub confidence: Option<Confidence>,
     pub binding_mode: BindingMode,
     pub locked: bool,
+    pub effect: EffectProfile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HaloSnapshot {
+    pub global_brightness: u8,
     pub slots: Vec<RingSlot>,
     pub tasks: Vec<TaskRecord>,
     pub queue: Vec<TaskRecord>,
