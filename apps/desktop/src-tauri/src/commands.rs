@@ -3,7 +3,9 @@ use crate::domain::effects::{Direction, EffectParameter, EffectProfile, EffectVa
 use crate::domain::engine::EngineError;
 use crate::domain::model::{HaloSnapshot, SignalKind, SignalSource, TaskKey, TaskSignal};
 use crate::domain::normalize::normalize_signal;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -39,7 +41,8 @@ pub struct UpdateEffectInput {
     rename_all_fields = "camelCase"
 )]
 pub enum CommandError {
-    InvalidTaskKey { task_key: String },
+    InvalidInput { argument: CommandArgument },
+    InvalidTaskKey,
     UnknownSignalKind { signal_kind: String },
     UnknownDirection { direction: String },
     SlotOutOfBounds { slot: usize },
@@ -49,10 +52,23 @@ pub enum CommandError {
     StateUnavailable,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CommandArgument {
+    Input,
+    Slot,
+    Left,
+    Right,
+    Value,
+}
+
 impl fmt::Display for CommandError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidTaskKey { task_key } => write!(formatter, "invalid task key: {task_key}"),
+            Self::InvalidInput { argument } => {
+                write!(formatter, "invalid {argument:?} command argument")
+            }
+            Self::InvalidTaskKey => formatter.write_str("invalid task key"),
             Self::UnknownSignalKind { signal_kind } => {
                 write!(formatter, "unknown signal kind: {signal_kind}")
             }
@@ -91,50 +107,50 @@ pub fn get_snapshot(state: tauri::State<'_, AppState>) -> Result<HaloSnapshot, C
 #[tauri::command]
 pub fn simulate_signal(
     state: tauri::State<'_, AppState>,
-    input: SimulateSignalInput,
+    input: Option<Value>,
 ) -> Result<HaloSnapshot, CommandError> {
-    simulate_signal_inner(&state, input)
+    simulate_signal_wire_inner(&state, input)
 }
 
 #[tauri::command]
 pub fn manual_bind(
     state: tauri::State<'_, AppState>,
-    input: ManualBindInput,
+    input: Option<Value>,
 ) -> Result<HaloSnapshot, CommandError> {
-    manual_bind_inner(&state, input)
+    manual_bind_wire_inner(&state, input)
 }
 
 #[tauri::command]
 pub fn toggle_lock(
     state: tauri::State<'_, AppState>,
-    slot: usize,
+    slot: Option<Value>,
 ) -> Result<HaloSnapshot, CommandError> {
-    toggle_lock_inner(&state, slot)
+    toggle_lock_wire_inner(&state, slot)
 }
 
 #[tauri::command]
 pub fn swap_slots(
     state: tauri::State<'_, AppState>,
-    left: usize,
-    right: usize,
+    left: Option<Value>,
+    right: Option<Value>,
 ) -> Result<HaloSnapshot, CommandError> {
-    swap_slots_inner(&state, left, right)
+    swap_slots_wire_inner(&state, left, right)
 }
 
 #[tauri::command]
 pub fn update_effect(
     state: tauri::State<'_, AppState>,
-    input: UpdateEffectInput,
+    input: Option<Value>,
 ) -> Result<HaloSnapshot, CommandError> {
-    update_effect_inner(&state, input)
+    update_effect_wire_inner(&state, input)
 }
 
 #[tauri::command]
 pub fn set_global_brightness(
     state: tauri::State<'_, AppState>,
-    value: u16,
+    value: Option<Value>,
 ) -> Result<HaloSnapshot, CommandError> {
-    set_global_brightness_inner(&state, value)
+    set_global_brightness_wire_inner(&state, value)
 }
 
 #[tauri::command]
@@ -152,13 +168,18 @@ fn get_snapshot_inner(state: &AppState) -> Result<HaloSnapshot, CommandError> {
     Ok(engine.snapshot())
 }
 
+fn simulate_signal_wire_inner(
+    state: &AppState,
+    input: Option<Value>,
+) -> Result<HaloSnapshot, CommandError> {
+    simulate_signal_inner(state, parse_wire_argument(input, CommandArgument::Input)?)
+}
+
 fn simulate_signal_inner(
     state: &AppState,
     input: SimulateSignalInput,
 ) -> Result<HaloSnapshot, CommandError> {
-    let task_key = TaskKey::parse(&input.task_key).map_err(|_| CommandError::InvalidTaskKey {
-        task_key: input.task_key,
-    })?;
+    let task_key = TaskKey::parse(&input.task_key).map_err(|_| CommandError::InvalidTaskKey)?;
     let signal_kind = parse_signal_kind(input.signal_kind)?;
     let normalized = normalize_signal(signal_kind, SignalSource::Simulator).map_err(|_| {
         CommandError::UnknownSignalKind {
@@ -175,13 +196,18 @@ fn simulate_signal_inner(
     })
 }
 
+fn manual_bind_wire_inner(
+    state: &AppState,
+    input: Option<Value>,
+) -> Result<HaloSnapshot, CommandError> {
+    manual_bind_inner(state, parse_wire_argument(input, CommandArgument::Input)?)
+}
+
 fn manual_bind_inner(
     state: &AppState,
     input: ManualBindInput,
 ) -> Result<HaloSnapshot, CommandError> {
-    let task_key = TaskKey::parse(&input.task_key).map_err(|_| CommandError::InvalidTaskKey {
-        task_key: input.task_key,
-    })?;
+    let task_key = TaskKey::parse(&input.task_key).map_err(|_| CommandError::InvalidTaskKey)?;
     mutate_and_snapshot(state, |engine| {
         engine
             .manual_bind(&task_key, input.slot, input.lock)
@@ -189,10 +215,29 @@ fn manual_bind_inner(
     })
 }
 
+fn toggle_lock_wire_inner(
+    state: &AppState,
+    slot: Option<Value>,
+) -> Result<HaloSnapshot, CommandError> {
+    toggle_lock_inner(state, parse_wire_argument(slot, CommandArgument::Slot)?)
+}
+
 fn toggle_lock_inner(state: &AppState, slot: usize) -> Result<HaloSnapshot, CommandError> {
     mutate_and_snapshot(state, |engine| {
         engine.toggle_lock(slot).map_err(CommandError::from)
     })
+}
+
+fn swap_slots_wire_inner(
+    state: &AppState,
+    left: Option<Value>,
+    right: Option<Value>,
+) -> Result<HaloSnapshot, CommandError> {
+    swap_slots_inner(
+        state,
+        parse_wire_argument(left, CommandArgument::Left)?,
+        parse_wire_argument(right, CommandArgument::Right)?,
+    )
 }
 
 fn swap_slots_inner(
@@ -203,6 +248,13 @@ fn swap_slots_inner(
     mutate_and_snapshot(state, |engine| {
         engine.swap_slots(left, right).map_err(CommandError::from)
     })
+}
+
+fn update_effect_wire_inner(
+    state: &AppState,
+    input: Option<Value>,
+) -> Result<HaloSnapshot, CommandError> {
+    update_effect_inner(state, parse_wire_argument(input, CommandArgument::Input)?)
 }
 
 fn update_effect_inner(
@@ -222,6 +274,13 @@ fn update_effect_inner(
     })
 }
 
+fn set_global_brightness_wire_inner(
+    state: &AppState,
+    value: Option<Value>,
+) -> Result<HaloSnapshot, CommandError> {
+    set_global_brightness_inner(state, parse_wire_argument(value, CommandArgument::Value)?)
+}
+
 fn set_global_brightness_inner(state: &AppState, value: u16) -> Result<HaloSnapshot, CommandError> {
     let value = validated_u8(EffectParameter::GlobalBrightness, value, 0, 100)?;
     mutate_and_snapshot(state, |engine| {
@@ -232,12 +291,27 @@ fn set_global_brightness_inner(state: &AppState, value: u16) -> Result<HaloSnaps
 }
 
 fn reset_virtual_device_inner(state: &AppState) -> Result<HaloSnapshot, CommandError> {
-    let mut engine = state
-        .engine
-        .lock()
-        .map_err(|_| CommandError::StateUnavailable)?;
+    let mut engine = match state.engine.lock() {
+        Ok(engine) => engine,
+        Err(poisoned) => {
+            let engine = poisoned.into_inner();
+            state.engine.clear_poison();
+            engine
+        }
+    };
     *engine = crate::domain::engine::HaloEngine::new(ROUND_COMPLETE_HOLD_MS);
     Ok(engine.snapshot())
+}
+
+fn parse_wire_argument<T: DeserializeOwned>(
+    value: Option<Value>,
+    argument: CommandArgument,
+) -> Result<T, CommandError> {
+    value
+        .ok_or(CommandError::InvalidInput { argument })
+        .and_then(|value| {
+            serde_json::from_value(value).map_err(|_| CommandError::InvalidInput { argument })
+        })
 }
 
 fn mutate_and_snapshot(
@@ -456,9 +530,11 @@ mod tests {
                     received_at_ms: 1,
                 },
             ),
-            Err(CommandError::InvalidTaskKey {
-                task_key: "not-a-task-key".to_owned()
-            })
+            Err(CommandError::InvalidTaskKey)
+        );
+        assert_eq!(
+            serde_json::to_value(CommandError::InvalidTaskKey).unwrap(),
+            serde_json::json!({ "code": "invalidTaskKey" })
         );
         assert_eq!(
             simulate_signal_inner(
@@ -523,9 +599,119 @@ mod tests {
             get_snapshot_inner(&poisoned),
             Err(CommandError::StateUnavailable)
         );
+        let reset = reset_virtual_device_inner(&poisoned)
+            .expect("reset must recover and clear a poisoned state");
+        assert!(reset.tasks.is_empty());
+        assert_eq!(
+            get_snapshot_inner(&poisoned).expect("state must be readable after reset"),
+            reset
+        );
         assert_eq!(
             serde_json::to_value(CommandError::StateUnavailable).unwrap(),
             serde_json::json!({ "code": "stateUnavailable" })
         );
+    }
+
+    #[test]
+    fn tauri_wire_boundary_maps_every_invalid_json_shape_to_stable_errors() {
+        let state = state();
+        let invalid_input = Err(CommandError::InvalidInput {
+            argument: CommandArgument::Input,
+        });
+
+        for value in [
+            None,
+            Some(serde_json::json!({
+                "taskKey": "0123456789abcdef",
+                "signalKind": "stop"
+            })),
+            Some(serde_json::json!({
+                "taskKey": "0123456789abcdef",
+                "signalKind": "stop",
+                "receivedAtMs": -1
+            })),
+            Some(serde_json::json!({
+                "taskKey": "0123456789abcdef",
+                "signalKind": "stop",
+                "receivedAtMs": "now"
+            })),
+            Some(serde_json::json!({
+                "taskKey": "0123456789abcdef",
+                "signalKind": "stop",
+                "receivedAtMs": 1,
+                "prompt": "must not be accepted"
+            })),
+        ] {
+            assert_eq!(
+                simulate_signal_wire_inner(&state, value),
+                invalid_input,
+                "missing fields, negative values, wrong types, and unknown fields must be stable"
+            );
+        }
+
+        for value in [
+            None,
+            Some(serde_json::json!(-1)),
+            Some(serde_json::json!("0")),
+        ] {
+            assert_eq!(
+                toggle_lock_wire_inner(&state, value),
+                Err(CommandError::InvalidInput {
+                    argument: CommandArgument::Slot,
+                })
+            );
+        }
+
+        assert_eq!(
+            update_effect_wire_inner(
+                &state,
+                Some(serde_json::json!({
+                    "slot": 0,
+                    "brightness": -1,
+                    "speedPercent": 100,
+                    "direction": "clockwise",
+                    "tailPercent": 35
+                })),
+            ),
+            invalid_input
+        );
+        assert_eq!(
+            set_global_brightness_wire_inner(&state, None),
+            Err(CommandError::InvalidInput {
+                argument: CommandArgument::Value,
+            })
+        );
+        assert_eq!(
+            swap_slots_wire_inner(&state, None, Some(serde_json::json!(1))),
+            Err(CommandError::InvalidInput {
+                argument: CommandArgument::Left,
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(CommandError::InvalidInput {
+                argument: CommandArgument::Input,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "code": "invalidInput",
+                "argument": "input"
+            })
+        );
+
+        let snapshot = simulate_signal_wire_inner(
+            &state,
+            Some(serde_json::json!({
+                "taskKey": "0123456789abcdef",
+                "signalKind": "userPromptSubmit",
+                "receivedAtMs": 9
+            })),
+        )
+        .expect("a valid camelCase input object must cross the wire boundary");
+        assert_eq!(snapshot.slots[0].status, TaskStatus::Running);
+
+        let snapshot = set_global_brightness_wire_inner(&state, Some(serde_json::json!(25)))
+            .expect("a valid scalar must cross the wire boundary");
+        assert_eq!(snapshot.global_brightness, 25);
     }
 }

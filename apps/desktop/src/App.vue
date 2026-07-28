@@ -1,160 +1,188 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
-const greetMsg = ref("");
-const name = ref("");
-
-async function greet() {
-  // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-  greetMsg.value = await invoke("greet", { name: name.value });
+interface VirtualSnapshot {
+  deviceMode: "virtual";
+  globalBrightness: number;
+  slots: Array<{
+    index: number;
+    taskKey: string | null;
+  }>;
 }
+
+const snapshot = ref<VirtualSnapshot | null>(null);
+const errorMessage = ref("");
+const isLoading = ref(false);
+
+const occupiedRings = computed(
+  () => snapshot.value?.slots.filter((slot) => slot.taskKey !== null).length ?? 0,
+);
+
+async function loadSnapshot() {
+  isLoading.value = true;
+  errorMessage.value = "";
+
+  try {
+    snapshot.value = await invoke<VirtualSnapshot>("get_snapshot");
+  } catch {
+    errorMessage.value = "暂时无法连接虚拟设备";
+  } finally {
+    isLoading.value = false;
+  }
+}
+
+onMounted(loadSnapshot);
 </script>
 
 <template>
-  <main class="container">
-    <h1>Welcome to Tauri + Vue</h1>
+  <main class="shell">
+    <section class="device-card" aria-live="polite">
+      <header>
+        <span class="eyebrow">CODEX HALO</span>
+        <span class="mode">{{ snapshot?.deviceMode ?? "virtual" }} device</span>
+      </header>
 
-    <div class="row">
-      <a href="https://vite.dev" target="_blank">
-        <img src="/vite.svg" class="logo vite" alt="Vite logo" />
-      </a>
-      <a href="https://tauri.app" target="_blank">
-        <img src="/tauri.svg" class="logo tauri" alt="Tauri logo" />
-      </a>
-      <a href="https://vuejs.org/" target="_blank">
-        <img src="./assets/vue.svg" class="logo vue" alt="Vue logo" />
-      </a>
-    </div>
-    <p>Click on the Tauri, Vite, and Vue logos to learn more.</p>
+      <div class="halo-mark" aria-hidden="true">
+        <i v-for="ring in 4" :key="ring" />
+      </div>
 
-    <form class="row" @submit.prevent="greet">
-      <input id="greet-input" v-model="name" placeholder="Enter a name..." />
-      <button type="submit">Greet</button>
-    </form>
-    <p>{{ greetMsg }}</p>
+      <h1>VIRTUAL DEVICE</h1>
+      <p v-if="snapshot" class="summary">
+        {{ snapshot.slots.length }} 个光环已就绪 · {{ occupiedRings }} 个任务已绑定
+      </p>
+      <p v-else-if="errorMessage" class="error">{{ errorMessage }}</p>
+      <p v-else class="summary">正在读取虚拟设备快照…</p>
+
+      <footer>
+        <span>全局亮度 {{ snapshot?.globalBrightness ?? "--" }}%</span>
+        <button type="button" :disabled="isLoading" @click="loadSnapshot">
+          {{ isLoading ? "读取中" : "刷新快照" }}
+        </button>
+      </footer>
+    </section>
   </main>
 </template>
 
 <style scoped>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
+:global(*) {
+  box-sizing: border-box;
 }
 
-.logo.vue:hover {
-  filter: drop-shadow(0 0 2em #249b73);
-}
-
-</style>
-<style>
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
+:global(body) {
+  min-width: 320px;
+  min-height: 100vh;
   margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
+  color: #e8ecec;
+  background:
+    radial-gradient(circle at 50% 42%, #202727 0, #0d1112 45%, #070909 100%);
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 
 button {
+  border: 1px solid #3c4545;
+  border-radius: 999px;
+  padding: 0.6rem 1rem;
+  color: #d7dddd;
+  background: #151a1a;
   cursor: pointer;
 }
 
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
+button:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 
-input,
-button {
-  outline: none;
+.shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
 }
 
-#greet-input {
-  margin-right: 5px;
+.device-card {
+  width: min(34rem, 100%);
+  border: 1px solid #303737;
+  border-radius: 1.5rem;
+  padding: 1.25rem 1.5rem 1.5rem;
+  text-align: center;
+  background: rgb(12 15 15 / 88%);
+  box-shadow: 0 1.8rem 5rem rgb(0 0 0 / 42%);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
+header,
+footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
 }
 
+footer {
+  margin-top: 1.5rem;
+  color: #849090;
+  font-size: 0.82rem;
+}
+
+.eyebrow,
+.mode {
+  color: #879292;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.67rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.mode {
+  color: #70c8c1;
+}
+
+.halo-mark {
+  position: relative;
+  width: 12rem;
+  aspect-ratio: 1;
+  margin: 2.5rem auto 1.75rem;
+}
+
+.halo-mark i {
+  position: absolute;
+  inset: calc((var(--ring) - 1) * 1.15rem);
+  border: 2px solid rgb(242 185 74 / calc(1 - (var(--ring) - 1) * 0.16));
+  border-radius: 50%;
+  box-shadow: 0 0 1rem rgb(242 185 74 / 18%);
+}
+
+.halo-mark i:nth-child(1) {
+  --ring: 1;
+}
+
+.halo-mark i:nth-child(2) {
+  --ring: 2;
+}
+
+.halo-mark i:nth-child(3) {
+  --ring: 3;
+}
+
+.halo-mark i:nth-child(4) {
+  --ring: 4;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(1.6rem, 5vw, 2.4rem);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.summary,
+.error {
+  min-height: 1.5rem;
+  margin: 0.65rem 0 0;
+  color: #8f9999;
+}
+
+.error {
+  color: #ff8a7c;
+}
 </style>
