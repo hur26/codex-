@@ -247,7 +247,10 @@ describe("App control center", () => {
       /\.device-display-layer\s*\{[\s\S]*position:\s*absolute[\s\S]*z-index:\s*25[\s\S]*pointer-events:\s*none/,
     );
     expect(baseStyles).toMatch(
-      /\.device-display-layer \.central-display\s*\{[\s\S]*width:\s*26%[\s\S]*pointer-events:\s*auto/,
+      /\.app-shell \.device-display-layer \.central-display\s*\{[\s\S]*width:\s*calc\(\s*var\(--halo-ring-inner-size\)\s*-\s*var\(--halo-ring-width\)\s*-\s*var\(--halo-ring-width\)\s*-\s*0\.25rem\s*\)[\s\S]*min-width:\s*0[\s\S]*max-width:\s*calc\(\s*var\(--halo-ring-inner-size\)\s*-\s*var\(--halo-ring-width\)\s*-\s*var\(--halo-ring-width\)\s*-\s*0\.25rem\s*\)[\s\S]*pointer-events:\s*auto/,
+    );
+    expect(baseStyles).not.toMatch(
+      /\.device-display-layer \.central-display\s*\{[\s\S]*width:\s*\d+%/,
     );
     expect(baseStyles).toMatch(
       /\.device-stage > \.crown-control\s*\{[\s\S]*z-index:\s*30/,

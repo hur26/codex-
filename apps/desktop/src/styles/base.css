@@ -314,8 +314,16 @@ body {
   pointer-events: none;
 }
 
-.device-display-layer .central-display {
-  width: 26%;
+.app-shell .device-display-layer .central-display {
+  width: calc(
+    var(--halo-ring-inner-size) - var(--halo-ring-width) -
+      var(--halo-ring-width) - 0.25rem
+  );
+  min-width: 0;
+  max-width: calc(
+    var(--halo-ring-inner-size) - var(--halo-ring-width) -
+      var(--halo-ring-width) - 0.25rem
+  );
   pointer-events: auto;
 }
 
