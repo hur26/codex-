@@ -9,6 +9,7 @@ const ACK_TIMEOUT_MS: u64 = 250;
 const MAX_RETRIES: u8 = 2;
 const HEARTBEAT_INTERVAL_MS: u64 = 1_000;
 const MAX_READS_PER_STEP: usize = 256;
+const FEATURE_AMOLED: u16 = 0x0001;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,7 +148,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
                 self.pump_reads(now_ms, snapshot, &mut intents);
             }
 
-            if self.phase == ManagerPhase::Ready && self.pending.is_none() {
+            if self.phase == ManagerPhase::Ready {
                 self.send_heartbeat_if_due(now_ms);
             }
         }
@@ -216,8 +217,8 @@ impl<T: DeviceTransport> DeviceManager<T> {
                 Ok(bytes) if bytes.is_empty() => break,
                 Ok(bytes) => bytes,
                 Err(TransportError::Timeout) => break,
-                Err(TransportError::Protocol(ProtocolError::UnsupportedVersion { actual })) => {
-                    self.mark_incompatible(actual);
+                Err(TransportError::Protocol(ProtocolError::UnsupportedVersion { .. })) => {
+                    self.mark_incompatible("Protocol major is incompatible");
                     break;
                 }
                 Err(_) => {
@@ -230,8 +231,8 @@ impl<T: DeviceTransport> DeviceManager<T> {
             for result in decoded {
                 match result {
                     Ok(frame) => self.handle_frame(frame, now_ms, snapshot, intents),
-                    Err(ProtocolError::UnsupportedVersion { actual }) => {
-                        self.mark_incompatible(actual);
+                    Err(ProtocolError::UnsupportedVersion { .. }) => {
+                        self.mark_incompatible("Protocol major is incompatible");
                     }
                     Err(_) => {}
                 }
@@ -265,12 +266,16 @@ impl<T: DeviceTransport> DeviceManager<T> {
 
         match pending.expected {
             ExpectedResponse::Capabilities if frame.message_type == MessageType::Capabilities => {
-                if let Some(firmware_version) = parse_capabilities(&frame.payload) {
+                let firmware_version = DeviceSnapshot::from_halo(snapshot)
+                    .encode_payload()
+                    .ok()
+                    .and_then(|payload| parse_capabilities(&frame.payload, payload.len()));
+                if let Some(firmware_version) = firmware_version {
                     self.pending = None;
                     self.status.firmware_version = Some(firmware_version);
                     self.queue_full_snapshot(now_ms, snapshot);
                 } else {
-                    self.force_reconnect("Device capabilities were invalid");
+                    self.mark_incompatible("Device capabilities are incompatible");
                 }
             }
             ExpectedResponse::Ack(expected_type)
@@ -282,7 +287,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
             }
             ExpectedResponse::Ack(expected_type)
                 if frame.message_type == MessageType::Nack
-                    && frame.payload.first() == Some(&(expected_type as u8)) =>
+                    && valid_nack_payload(&frame.payload, expected_type) =>
             {
                 self.retry_pending(now_ms, "Device rejected state update");
             }
@@ -458,12 +463,12 @@ impl<T: DeviceTransport> DeviceManager<T> {
         Some(intent)
     }
 
-    fn mark_incompatible(&mut self, _actual_major: u8) {
+    fn mark_incompatible(&mut self, message: &'static str) {
         let _ = self.transport.disconnect();
         self.reset_connection_state();
         self.phase = ManagerPhase::Incompatible;
         self.status.state = DeviceConnectionState::Incompatible;
-        self.status.message = Some("Protocol major is incompatible".to_owned());
+        self.status.message = Some(message.to_owned());
     }
 
     fn force_reconnect(&mut self, message: &'static str) {
@@ -499,15 +504,28 @@ impl<T: DeviceTransport> DeviceManager<T> {
     }
 }
 
-fn parse_capabilities(payload: &[u8]) -> Option<String> {
+fn parse_capabilities(payload: &[u8], required_payload: usize) -> Option<String> {
     if payload.len() != 9 || payload[4] != 4 {
         return None;
     }
+    let feature_flags = u16::from_le_bytes([payload[5], payload[6]]);
     let max_payload = u16::from_le_bytes([payload[7], payload[8]]);
-    if usize::from(max_payload) > MAX_PAYLOAD {
+    if feature_flags & FEATURE_AMOLED == 0
+        || usize::from(max_payload) < required_payload
+        || usize::from(max_payload) > MAX_PAYLOAD
+    {
         return None;
     }
     Some(format!("{}.{}.{}", payload[1], payload[2], payload[3]))
+}
+
+fn valid_nack_payload(payload: &[u8], expected_type: MessageType) -> bool {
+    match payload {
+        [message_type, reason] => {
+            *message_type == expected_type as u8 && (0x01..=0x05).contains(reason)
+        }
+        _ => false,
+    }
 }
 
 fn update_message_type(update: &DeviceUpdate) -> MessageType {
@@ -614,6 +632,53 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_capabilities_never_receive_state_writes() {
+        let snapshot = fixture_halo_snapshot();
+        let required_payload = DeviceSnapshot::from_halo(&snapshot)
+            .encode_payload()
+            .unwrap()
+            .len() as u16;
+
+        let mut undersized = SimulatedTransport::default();
+        undersized.set_max_payload(required_payload - 1);
+        let mut undersized_manager = DeviceManager::new(undersized);
+        undersized_manager.step(0, &snapshot);
+        assert_eq!(
+            undersized_manager.status().state,
+            DeviceConnectionState::Incompatible
+        );
+        assert_eq!(undersized_manager.transport().state_write_count(), 0);
+
+        let mut missing_amoled = SimulatedTransport::default();
+        missing_amoled.set_feature_flags(0x0002);
+        let mut missing_amoled_manager = DeviceManager::new(missing_amoled);
+        missing_amoled_manager.step(0, &snapshot);
+        assert_eq!(
+            missing_amoled_manager.status().state,
+            DeviceConnectionState::Incompatible
+        );
+        assert_eq!(missing_amoled_manager.transport().state_write_count(), 0);
+    }
+
+    #[test]
+    fn required_capabilities_allow_unknown_feature_bits() {
+        let snapshot = fixture_halo_snapshot();
+        let required_payload = DeviceSnapshot::from_halo(&snapshot)
+            .encode_payload()
+            .unwrap()
+            .len() as u16;
+        let mut transport = SimulatedTransport::default();
+        transport.set_feature_flags(0x8001);
+        transport.set_max_payload(required_payload);
+        let mut manager = DeviceManager::new(transport);
+
+        manager.step(0, &snapshot);
+
+        assert_eq!(manager.status().state, DeviceConnectionState::Virtual);
+        assert_eq!(manager.transport().state_write_count(), 1);
+    }
+
+    #[test]
     fn old_knob_sequences_are_ignored_and_new_events_become_intents() {
         let mut manager = online_manager();
         manager
@@ -650,6 +715,27 @@ mod tests {
         assert_eq!(manager.transport().heartbeat_count(), 1);
         manager.step(2_000, &fixture_halo_snapshot());
         assert_eq!(manager.transport().heartbeat_count(), 2);
+    }
+
+    #[test]
+    fn heartbeat_continues_while_a_state_ack_is_pending() {
+        let mut manager = online_manager();
+        manager.transport_mut().script(Fault::TimeoutOnce);
+        manager.transport_mut().script(Fault::TimeoutOnce);
+        manager.transport_mut().script(Fault::TimeoutOnce);
+        let mut changed = fixture_halo_snapshot();
+        changed.revision = 2;
+        changed.global_brightness = 50;
+
+        manager.step(900, &changed);
+        manager.step(1_000, &changed);
+        assert_eq!(manager.transport().heartbeat_count(), 1);
+
+        manager.step(1_150, &changed);
+        manager.step(1_151, &changed);
+        manager.step(2_000, &changed);
+        assert_eq!(manager.transport().heartbeat_count(), 2);
+        assert_eq!(manager.metrics().retry_count, 2);
     }
 
     #[test]
@@ -695,6 +781,118 @@ mod tests {
         assert_eq!(
             manager.transport().applied_snapshot().unwrap().rings[3].status,
             crate::device::presentation::DeviceTaskStatus::Failed
+        );
+    }
+
+    #[test]
+    fn malformed_and_unknown_nacks_wait_for_timeout_before_retrying() {
+        for fault in [Fault::MalformedNackOnce, Fault::UnknownNackReasonOnce(0xff)] {
+            let mut manager = online_manager();
+            manager.transport_mut().script(fault);
+            let initial_writes = manager.transport().state_write_count();
+            let mut changed = fixture_halo_snapshot();
+            changed.revision = 2;
+            changed.global_brightness = 50;
+
+            manager.step(10, &changed);
+            assert_eq!(manager.transport().state_write_count(), initial_writes + 1);
+            assert_eq!(manager.metrics().retry_count, 0);
+
+            manager.step(259, &changed);
+            assert_eq!(manager.transport().state_write_count(), initial_writes + 1);
+            manager.step(260, &changed);
+            assert_eq!(manager.transport().state_write_count(), initial_writes + 2);
+            assert_eq!(manager.metrics().retry_count, 1);
+            manager.step(261, &changed);
+            assert_eq!(
+                manager
+                    .transport()
+                    .applied_snapshot()
+                    .unwrap()
+                    .global_brightness,
+                50
+            );
+        }
+    }
+
+    #[test]
+    fn nack_once_retries_and_applies_the_final_state() {
+        let mut manager = online_manager();
+        manager
+            .transport_mut()
+            .script(Fault::NackOnce(crate::device::simulator::NackReason::Busy));
+        let mut changed = fixture_halo_snapshot();
+        changed.revision = 2;
+        changed.global_brightness = 50;
+
+        manager.step(10, &changed);
+
+        assert_eq!(manager.metrics().retry_count, 1);
+        assert_eq!(manager.transport().state_write_count(), 3);
+        assert_eq!(
+            manager
+                .transport()
+                .applied_snapshot()
+                .unwrap()
+                .global_brightness,
+            50
+        );
+    }
+
+    #[test]
+    fn repeated_nacks_retry_twice_then_reconnect_with_the_final_state() {
+        let mut manager = online_manager();
+        for _ in 0..3 {
+            manager
+                .transport_mut()
+                .script(Fault::NackOnce(crate::device::simulator::NackReason::Busy));
+        }
+        let mut changed = fixture_halo_snapshot();
+        changed.revision = 2;
+        changed.global_brightness = 50;
+
+        manager.step(10, &changed);
+        assert_eq!(manager.metrics().retry_count, 2);
+        manager.step(11, &changed);
+
+        assert_eq!(manager.metrics().retry_count, 2);
+        assert_eq!(manager.metrics().reconnect_count, 1);
+        assert_eq!(manager.transport().full_snapshot_count(), 2);
+        assert_eq!(
+            manager
+                .transport()
+                .applied_snapshot()
+                .unwrap()
+                .global_brightness,
+            50
+        );
+    }
+
+    #[test]
+    fn corrupt_crc_once_retries_after_timeout_and_applies_the_final_state() {
+        let mut manager = online_manager();
+        manager.transport_mut().script(Fault::CorruptCrcOnce);
+        let mut changed = fixture_halo_snapshot();
+        changed.revision = 2;
+        changed.global_brightness = 50;
+
+        manager.step(10, &changed);
+        assert_eq!(manager.metrics().retry_count, 0);
+        manager.step(259, &changed);
+        assert_eq!(manager.metrics().retry_count, 0);
+        manager.step(260, &changed);
+        assert_eq!(manager.metrics().retry_count, 1);
+        manager.step(261, &changed);
+
+        assert_eq!(manager.metrics().retry_count, 1);
+        assert!(manager.metrics().retry_count <= 2);
+        assert_eq!(
+            manager
+                .transport()
+                .applied_snapshot()
+                .unwrap()
+                .global_brightness,
+            50
         );
     }
 

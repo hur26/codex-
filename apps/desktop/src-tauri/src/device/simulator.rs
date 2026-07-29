@@ -5,7 +5,8 @@ use crate::device::protocol::{self, Decoder, Frame, MessageType, PROTOCOL_MAJOR}
 use crate::device::transport::{DeviceTransport, Endpoint, TransportError, TransportKind};
 use std::collections::VecDeque;
 
-const CAPABILITIES_PAYLOAD: [u8; 9] = [0, 0, 1, 0, 4, 0x03, 0x00, 0x00, 0x02];
+const DEFAULT_FEATURE_FLAGS: u16 = 0x0003;
+const DEFAULT_MAX_PAYLOAD: u16 = 512;
 const RING_COUNT: usize = 4;
 const RING_PAYLOAD_BYTES: usize = 8;
 const FULL_SNAPSHOT_PREFIX_BYTES: usize = 12;
@@ -33,6 +34,8 @@ pub enum KnobEvent {
 pub enum Fault {
     TimeoutOnce,
     NackOnce(NackReason),
+    MalformedNackOnce,
+    UnknownNackReasonOnce(u8),
     CorruptCrcOnce,
 }
 
@@ -53,6 +56,8 @@ pub struct SimulatedTransport {
     responses: VecDeque<PendingResponse>,
     faults: VecDeque<Fault>,
     protocol_major: u8,
+    feature_flags: u16,
+    max_payload: u16,
     next_knob_sequence: u16,
     applied_snapshot: Option<DeviceSnapshot>,
     state_write_log: Vec<(MessageType, u16)>,
@@ -68,6 +73,8 @@ impl Default for SimulatedTransport {
             responses: VecDeque::new(),
             faults: VecDeque::new(),
             protocol_major: PROTOCOL_MAJOR,
+            feature_flags: DEFAULT_FEATURE_FLAGS,
+            max_payload: DEFAULT_MAX_PAYLOAD,
             next_knob_sequence: 0,
             applied_snapshot: None,
             state_write_log: Vec::new(),
@@ -88,6 +95,14 @@ impl SimulatedTransport {
 
     pub fn set_protocol_major(&mut self, protocol_major: u8) {
         self.protocol_major = protocol_major;
+    }
+
+    pub fn set_feature_flags(&mut self, feature_flags: u16) {
+        self.feature_flags = feature_flags;
+    }
+
+    pub fn set_max_payload(&mut self, max_payload: u16) {
+        self.max_payload = max_payload;
     }
 
     pub fn full_snapshot_count(&self) -> usize {
@@ -156,6 +171,26 @@ impl SimulatedTransport {
         }
         let response_fault = match self.faults.pop_front() {
             Some(Fault::NackOnce(reason)) => return self.queue_nack(&frame, reason, None),
+            Some(Fault::MalformedNackOnce) => {
+                return self.queue_response(
+                    Frame::new(
+                        MessageType::Nack,
+                        frame.sequence,
+                        vec![frame.message_type as u8],
+                    ),
+                    None,
+                );
+            }
+            Some(Fault::UnknownNackReasonOnce(reason)) => {
+                return self.queue_response(
+                    Frame::new(
+                        MessageType::Nack,
+                        frame.sequence,
+                        vec![frame.message_type as u8, reason],
+                    ),
+                    None,
+                );
+            }
             Some(Fault::TimeoutOnce) => Some(ResponseFault::Timeout),
             Some(Fault::CorruptCrcOnce) => Some(ResponseFault::CorruptCrc),
             None => None,
@@ -166,7 +201,7 @@ impl SimulatedTransport {
                 Frame::new(
                     MessageType::Capabilities,
                     frame.sequence,
-                    CAPABILITIES_PAYLOAD.to_vec(),
+                    self.capabilities_payload(),
                 ),
                 response_fault,
             ),
@@ -241,6 +276,13 @@ impl SimulatedTransport {
             ),
             fault,
         )
+    }
+
+    fn capabilities_payload(&self) -> Vec<u8> {
+        let mut payload = vec![0, 0, 1, 0, 4];
+        payload.extend_from_slice(&self.feature_flags.to_le_bytes());
+        payload.extend_from_slice(&self.max_payload.to_le_bytes());
+        payload
     }
 
     fn queue_nack(
