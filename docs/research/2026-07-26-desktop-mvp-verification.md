@@ -2,8 +2,8 @@
 
 **执行日期：** 2026-07-29
 
-**验证内容：** 基于 `21565de` 加本次提交中的源码与 Tauri 配置；构建产物使用
-本次提交内的 `tauri.conf.json`。本文不使用尚未产生的提交哈希作自引用基线。
+**验证内容：** 构建产物基于工作树干净的 `1f16425`，包含锁定圈位保护修复，
+并使用该提交内的 `tauri.conf.json`。本文后续的报告更新不冒充构建输入。
 
 **平台：** Windows x64，Rust target `x86_64-pc-windows-msvc`
 
@@ -14,8 +14,9 @@
 Tauri 下载 WiX 工具时发生 `timeout: global`，不是应用编译失败，也没有为了
 打包启用 VBSCRIPT 或其他系统可选功能。
 
-本轮没有实体硬件。2026-07-29 已在 Windows 实机启动 release 主程序并完成
-一组可视化操作烟雾测试，但没有执行真实双任务到桌面圆环的计时实验。因此，
+本轮没有实体硬件。2026-07-29 已在 Windows 实机对较早的 release 基线完成
+一组可视化操作烟雾测试；锁定修复后的刷新包只执行了主程序进程启动检查，
+没有重新执行可视化交互，也没有执行真实双任务到桌面圆环的计时实验。因此，
 “真实两个 Codex 任务在 1 秒内更新正确圆环”和所有实体设备行为仍明确标记为
 未验证，不计入通过项。当前真实 Hook 门禁还受到桌面进程未执行 Hook 的明确
 阻断，因此 Task 13 不是全部门禁通过。
@@ -66,20 +67,28 @@ Python 唯一跳过项是符号链接拒绝测试。当前 Windows 会话创建�
 `tauri.conf.json` 的 Windows 开发包目标明确为 `nsis` 与 `msi`，默认窗口为
 1440 × 900，最小窗口为 1080 × 680。
 
-第一次执行 `npm run tauri build` 时，release 主程序成功，随后下载 NSIS
-工具发生 Tauri 全局超时。第二次执行复用了缓存，NSIS 安装包成功生成，随后
-下载 WiX 工具时再次发生相同网络超时。停止继续重试，未修改系统功能。
+早期第一次执行 `npm run tauri build` 时，release 主程序成功，随后下载 NSIS
+工具发生 Tauri 全局超时；第二次执行复用了缓存，NSIS 安装包成功生成，随后
+下载 WiX 工具时发生相同网络超时。
+
+锁定圈位修复提交 `1f16425` 后再次从干净工作树执行同一命令。前端生产构建与
+Rust release 编译成功，缓存中的 NSIS 工具成功生成刷新安装包；随后下载 WiX
+3.14.1 工具时再次发生 `timeout: global`，所以整条 Tauri 命令最终以失败退出，
+但失败发生在已完成主程序与 NSIS 之后。停止继续重试，未修改系统功能。
 
 | 产物 | 大小（字节） | SHA-256 |
 |---|---:|---|
-| `D:\Project\codex-halo\apps\desktop\src-tauri\target\release\codex-halo-desktop.exe` | 9,053,184 | `4BCFDFC1DF5DC79125E7F688D3927FED95DFD03F9E251D04BF17F9231126D173` |
-| `D:\Project\codex-halo\apps\desktop\src-tauri\target\release\bundle\nsis\Codex Halo_0.1.0_x64-setup.exe` | 2,181,752 | `E6D499DF8597FB1103D44B8577551C3323A21E2C66B642C9ABFA06E0CCAF3B1E` |
+| `D:\Project\codex-halo\apps\desktop\src-tauri\target\release\codex-halo-desktop.exe` | 9,054,208 | `418BEED6FB3889CCD67F8C7323400A6E161CA1F84CEB810EC5F844EF44643D84` |
+| `D:\Project\codex-halo\apps\desktop\src-tauri\target\release\bundle\nsis\Codex Halo_0.1.0_x64-setup.exe` | 2,178,076 | `340C85EAB6D94C23A83CB89B467B474BB2621F15C7ED084A2FA9063F90CDB3E2` |
 
-两项产物的 Windows 元数据均为 `Codex Halo 0.1.0`，Authenticode 状态均为
-`NotSigned`。主程序进行了一次非交互进程烟雾测试：启动 3 秒后仍存活，随后
-仅终止该次测试创建的进程。
+两项刷新产物的 Windows `ProductName` 与 `FileDescription` 均为
+`Codex Halo`，`FileVersion` 与 `ProductVersion` 均为 `0.1.0`，
+Authenticode 状态均为 `NotSigned`。刷新主程序进行了一次非交互进程烟雾
+测试：启动 3 秒后仍存活，随后仅终止该次测试创建的进程。该检查直接运行主
+程序，不是安装验收；NSIS 仅完成生成、元数据和校验和核对，未执行安装、
+卸载或升级。
 
-同一 release 主程序还通过 Windows 实机可视化操作完成以下检查：
+此前的 release 基线主程序通过 Windows 实机可视化操作完成以下检查：
 
 - 窗口标题为 `Codex Halo`，界面明确显示 `VIRTUAL DEVICE`，未出现 USB 错误；
 - Adapter 显示 `ONLINE / HOOK`，四个圆环完整呈现；
@@ -102,8 +111,9 @@ Python 唯一跳过项是符号链接拒绝测试。当前 Windows 会话创建�
 
 这些结果验证的是合成探针文件经生产 adapter 到桌面 UI 的链路，不是真实
 Codex 桌面进程执行 Hook 的证据，也没有测量小于 1 秒的端到端延迟。验收中还
-发现手动绑定可覆盖锁定圈的缺陷；该缺陷随后通过领域层不变量和自动回归测试
-修复，但尚未在打包后的窗口中重新执行同一人工步骤。
+发现手动绑定可覆盖锁定圈的缺陷；该缺陷随后在 `1f16425` 通过领域层不变量
+和自动回归测试修复，本节记录的刷新主程序与 NSIS 已包含该提交，但尚未在
+刷新包窗口中重新执行同一人工步骤。
 
 **未生成：**
 `D:\Project\codex-halo\apps\desktop\src-tauri\target\release\bundle\msi\`。
