@@ -191,10 +191,11 @@ function clearSlot(slot: RingSlot): RingSlot {
 
 class DemoHaloBridge implements HaloBridge {
   private snapshot = initialDemoSnapshot();
+  private readonly queue: TaskKey[] = [];
   private readonly listeners = new Set<(snapshot: HaloSnapshot) => void>();
 
   async getSnapshot(): Promise<HaloSnapshot> {
-    return cloneSnapshot(this.snapshot);
+    return this.currentSnapshot();
   }
 
   async subscribeSnapshots(
@@ -216,6 +217,16 @@ class DemoHaloBridge implements HaloBridge {
   }
 
   async simulateSignal(input: SimulateSignalInput): Promise<HaloSnapshot> {
+    const existingTask = this.snapshot.tasks.find(
+      (candidate) => candidate.taskKey === input.taskKey,
+    );
+    if (
+      existingTask &&
+      input.receivedAtMs < existingTask.lastActiveAtMs
+    ) {
+      return this.currentSnapshot();
+    }
+
     const normalized = normalizedDemoState(input.signalKind);
     const task: TaskRecord = {
       taskKey: input.taskKey,
@@ -245,20 +256,14 @@ class DemoHaloBridge implements HaloBridge {
           assignedSlot.locked,
         ),
       );
+      this.removeFromQueue(task.taskKey);
     } else {
       const empty = this.snapshot.slots.find((slot) => slot.taskKey === null);
       if (empty) {
         Object.assign(empty, slotFromTask(empty, task, "auto", false));
-        this.snapshot.queue = this.snapshot.queue.filter(
-          (queued) => queued.taskKey !== task.taskKey,
-        );
+        this.removeFromQueue(task.taskKey);
       } else {
-        this.snapshot.queue = [
-          task,
-          ...this.snapshot.queue.filter(
-            (queued) => queued.taskKey !== task.taskKey,
-          ),
-        ];
+        this.enqueueRecent(task.taskKey);
       }
     }
 
@@ -271,26 +276,25 @@ class DemoHaloBridge implements HaloBridge {
     const current = this.snapshot.slots.find(
       (slot) => slot.taskKey === task.taskKey,
     );
+    if (current?.index === target.index) {
+      Object.assign(target, slotFromTask(target, task, "manual", input.lock));
+      this.removeFromQueue(task.taskKey);
+      return this.publish();
+    }
+
     const displacedTaskKey =
       target.taskKey === task.taskKey ? null : target.taskKey;
 
-    if (current && current.index !== target.index) {
+    if (current) {
       Object.assign(current, clearSlot(current));
     }
     Object.assign(target, slotFromTask(target, task, "manual", input.lock));
-    this.snapshot.queue = this.snapshot.queue.filter(
-      (queued) => queued.taskKey !== task.taskKey,
-    );
+    this.removeFromQueue(task.taskKey);
 
     if (displacedTaskKey) {
-      const displaced = assertTask(this.snapshot, displacedTaskKey);
-      this.snapshot.queue = [
-        displaced,
-        ...this.snapshot.queue.filter(
-          (queued) => queued.taskKey !== displacedTaskKey,
-        ),
-      ];
+      this.enqueueRecent(displacedTaskKey);
     }
+    this.fillEmptySlotsFromQueue();
 
     return this.publish();
   }
@@ -340,12 +344,76 @@ class DemoHaloBridge implements HaloBridge {
   }
 
   private publish(): HaloSnapshot {
-    const next = cloneSnapshot(this.snapshot);
+    const next = this.currentSnapshot();
     for (const listener of this.listeners) {
       listener(cloneSnapshot(next));
     }
     return next;
   }
+
+  private currentSnapshot(): HaloSnapshot {
+    const tasks = this.snapshot.tasks
+      .map((task) => ({ ...task }))
+      .sort(compareTasksByActivity);
+    const queue = this.queue.flatMap((taskKey) => {
+      const task = this.snapshot.tasks.find(
+        (candidate) => candidate.taskKey === taskKey,
+      );
+      return task ? [{ ...task, status: "queued" as const }] : [];
+    });
+    return cloneSnapshot({
+      ...this.snapshot,
+      tasks,
+      queue,
+    });
+  }
+
+  private removeFromQueue(taskKey: TaskKey): void {
+    const index = this.queue.indexOf(taskKey);
+    if (index >= 0) {
+      this.queue.splice(index, 1);
+    }
+  }
+
+  private enqueueRecent(taskKey: TaskKey): void {
+    this.removeFromQueue(taskKey);
+    this.queue.push(taskKey);
+    this.queue.sort((left, right) => {
+      const leftTask = assertTask(this.snapshot, left);
+      const rightTask = assertTask(this.snapshot, right);
+      return (
+        rightTask.lastActiveAtMs - leftTask.lastActiveAtMs ||
+        compareTaskKeys(left, right)
+      );
+    });
+  }
+
+  private fillEmptySlotsFromQueue(): void {
+    let empty = this.snapshot.slots.find((slot) => slot.taskKey === null);
+    while (empty && this.queue.length > 0) {
+      const taskKey = this.queue.shift();
+      if (!taskKey) {
+        return;
+      }
+      const task = assertTask(this.snapshot, taskKey);
+      Object.assign(empty, slotFromTask(empty, task, "auto", false));
+      empty = this.snapshot.slots.find((slot) => slot.taskKey === null);
+    }
+  }
+}
+
+function compareTaskKeys(left: TaskKey, right: TaskKey): number {
+  if (left === right) {
+    return 0;
+  }
+  return left < right ? -1 : 1;
+}
+
+function compareTasksByActivity(left: TaskRecord, right: TaskRecord): number {
+  return (
+    right.lastActiveAtMs - left.lastActiveAtMs ||
+    compareTaskKeys(left.taskKey, right.taskKey)
+  );
 }
 
 type TauriGlobal = typeof globalThis & {

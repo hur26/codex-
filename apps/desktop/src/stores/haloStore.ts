@@ -74,22 +74,49 @@ export function createHaloStore(bridge: HaloBridge = haloBridge) {
   );
 
   let unlisten: (() => void) | null = null;
-  let startPromise: Promise<void> | null = null;
+  let desiredRunning = false;
+  let lifecycleGeneration = 0;
+  let lifecyclePromise = Promise.resolve();
+  let snapshotRevision = 0;
+  let loadPromise: Promise<void> | null = null;
 
   function recordError(operation: HaloStoreOperation, error: unknown): void {
     state.error = stableError(operation, error);
   }
 
-  async function load(): Promise<void> {
+  function applySnapshot(snapshot: HaloSnapshot): void {
+    state.snapshot = snapshot;
+    snapshotRevision += 1;
+  }
+
+  function load(): Promise<void> {
+    if (loadPromise) {
+      return loadPromise;
+    }
+
     state.loading = true;
     state.error = null;
-    try {
-      state.snapshot = await bridge.getSnapshot();
-    } catch (error: unknown) {
-      recordError("load", error);
-    } finally {
-      state.loading = false;
-    }
+    const revisionAtStart = snapshotRevision;
+    const request = (async () => {
+      try {
+        const snapshot = await bridge.getSnapshot();
+        if (snapshotRevision === revisionAtStart) {
+          applySnapshot(snapshot);
+        }
+      } catch (error: unknown) {
+        if (snapshotRevision === revisionAtStart) {
+          recordError("load", error);
+        }
+      }
+    })();
+    const tracked = request.finally(() => {
+      if (loadPromise === tracked) {
+        loadPromise = null;
+        state.loading = false;
+      }
+    });
+    loadPromise = tracked;
+    return tracked;
   }
 
   async function refreshAdapterStatus(): Promise<void> {
@@ -105,37 +132,61 @@ export function createHaloStore(bridge: HaloBridge = haloBridge) {
     }
   }
 
-  async function start(): Promise<void> {
-    if (unlisten) {
-      return;
-    }
-    if (startPromise) {
-      return startPromise;
-    }
+  function scheduleSubscription(
+    targetRunning: boolean,
+    generation: number,
+  ): Promise<void> {
+    const transition = async () => {
+      if (!targetRunning) {
+        const cleanup = unlisten;
+        unlisten = null;
+        cleanup?.();
+        return;
+      }
 
-    startPromise = bridge
-      .subscribeSnapshots((snapshot) => {
-        state.snapshot = snapshot;
-      })
-      .then((cleanup) => {
+      if (unlisten) {
+        return;
+      }
+
+      try {
+        const cleanup = await bridge.subscribeSnapshots((snapshot) => {
+          if (desiredRunning && lifecycleGeneration === generation) {
+            applySnapshot(snapshot);
+          }
+        });
+        if (!desiredRunning || lifecycleGeneration !== generation) {
+          cleanup();
+          return;
+        }
         unlisten = cleanup;
-      })
-      .catch((error: unknown) => {
-        recordError("subscribe", error);
-      })
-      .finally(() => {
-        startPromise = null;
-      });
-    return startPromise;
+      } catch (error: unknown) {
+        if (desiredRunning && lifecycleGeneration === generation) {
+          desiredRunning = false;
+          recordError("subscribe", error);
+        }
+      }
+    };
+
+    lifecyclePromise = lifecyclePromise.then(transition, transition);
+    return lifecyclePromise;
   }
 
-  async function stop(): Promise<void> {
-    if (startPromise) {
-      await startPromise;
+  function start(): Promise<void> {
+    if (desiredRunning) {
+      return lifecyclePromise;
     }
-    const cleanup = unlisten;
-    unlisten = null;
-    cleanup?.();
+    desiredRunning = true;
+    lifecycleGeneration += 1;
+    return scheduleSubscription(true, lifecycleGeneration);
+  }
+
+  function stop(): Promise<void> {
+    if (!desiredRunning && !unlisten) {
+      return lifecyclePromise;
+    }
+    desiredRunning = false;
+    lifecycleGeneration += 1;
+    return scheduleSubscription(false, lifecycleGeneration);
   }
 
   async function replaceFromCommand(
@@ -148,7 +199,7 @@ export function createHaloStore(bridge: HaloBridge = haloBridge) {
     state.error = null;
     try {
       const snapshot = await command();
-      state.snapshot = snapshot;
+      applySnapshot(snapshot);
       return snapshot;
     } catch (error: unknown) {
       recordError(operation, error);
