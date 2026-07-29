@@ -41,7 +41,7 @@ Tauri bridge。
 # 仓库根目录
 python -m unittest discover -s tests -p 'test_*.py'
 
-# apps/desktop
+Set-Location apps/desktop
 npm test
 npm run typecheck
 npm run build
