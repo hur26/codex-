@@ -313,6 +313,79 @@ describe("createHaloStore", () => {
     expect(store.state.snapshot).toStrictEqual(RUNNING_SNAPSHOT);
   });
 
+  it("事件 revision 5 后成功返回的 load revision 6 仍会成为当前快照", async () => {
+    const pendingLoad = deferred<HaloSnapshot>();
+    let listener: ((snapshot: HaloSnapshot) => void) | undefined;
+    const bridge = createStubBridge({
+      getSnapshot: () => pendingLoad.promise,
+      subscribeSnapshots: async (next) => {
+        listener = next;
+        return () => undefined;
+      },
+    });
+    const store = createHaloStore(bridge);
+    await store.start();
+
+    const loading = store.load();
+    listener?.({ ...RUNNING_SNAPSHOT, revision: 5 });
+    const newest = {
+      ...RUNNING_SNAPSHOT,
+      revision: 6,
+      globalBrightness: 60,
+    };
+    pendingLoad.resolve(newest);
+    await loading;
+
+    expect(store.state.snapshot).toStrictEqual(newest);
+  });
+
+  it("事件 revision 6 后成功返回的 load revision 5 由版本裁决拒绝", async () => {
+    const pendingLoad = deferred<HaloSnapshot>();
+    let listener: ((snapshot: HaloSnapshot) => void) | undefined;
+    const bridge = createStubBridge({
+      getSnapshot: () => pendingLoad.promise,
+      subscribeSnapshots: async (next) => {
+        listener = next;
+        return () => undefined;
+      },
+    });
+    const store = createHaloStore(bridge);
+    await store.start();
+
+    const loading = store.load();
+    const newest = { ...RUNNING_SNAPSHOT, revision: 6 };
+    listener?.(newest);
+    pendingLoad.resolve({
+      ...RUNNING_SNAPSHOT,
+      revision: 5,
+      globalBrightness: 50,
+    });
+    await loading;
+
+    expect(store.state.snapshot).toStrictEqual(newest);
+  });
+
+  it("较早 load 失败不会在新事件快照后写入陈旧错误", async () => {
+    const pendingLoad = deferred<HaloSnapshot>();
+    let listener: ((snapshot: HaloSnapshot) => void) | undefined;
+    const bridge = createStubBridge({
+      getSnapshot: () => pendingLoad.promise,
+      subscribeSnapshots: async (next) => {
+        listener = next;
+        return () => undefined;
+      },
+    });
+    const store = createHaloStore(bridge);
+    await store.start();
+
+    const loading = store.load();
+    listener?.({ ...RUNNING_SNAPSHOT, revision: 5 });
+    pendingLoad.reject({ code: "offline" });
+    await loading;
+
+    expect(store.state.error).toBeNull();
+  });
+
   it("实时事件的新 revision 不会被稍后返回的旧命令快照覆盖", async () => {
     const pendingCommand = deferred<HaloSnapshot>();
     let listener: ((snapshot: HaloSnapshot) => void) | undefined;
@@ -428,6 +501,40 @@ describe("createHaloStore", () => {
         })
       ).revision,
     ).toBe(3);
+  });
+
+  it("演示 bridge 的 bound/queued 完全相同重放不递增，等时不同状态递增", async () => {
+    const bridge = createDemoHaloBridge();
+    const boundInput: SimulateSignalInput = {
+      taskKey: "0000000000000001",
+      signalKind: "userPromptSubmit",
+      receivedAtMs: 100,
+    };
+    const bound = await bridge.simulateSignal(boundInput);
+    const boundReplay = await bridge.simulateSignal(boundInput);
+    expect(boundReplay.revision).toBe(bound.revision);
+
+    for (let value = 2; value <= 4; value += 1) {
+      await bridge.simulateSignal({
+        taskKey: value.toString(16).padStart(16, "0"),
+        signalKind: "userPromptSubmit",
+        receivedAtMs: value * 100,
+      });
+    }
+    const queuedInput: SimulateSignalInput = {
+      taskKey: "0000000000000005",
+      signalKind: "permissionRequest",
+      receivedAtMs: 500,
+    };
+    const queued = await bridge.simulateSignal(queuedInput);
+    const queuedReplay = await bridge.simulateSignal(queuedInput);
+    expect(queuedReplay.revision).toBe(queued.revision);
+
+    const changed = await bridge.simulateSignal({
+      ...queuedInput,
+      signalKind: "userPromptSubmit",
+    });
+    expect(changed.revision).toBe(queued.revision + 1);
   });
 });
 

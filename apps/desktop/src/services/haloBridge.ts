@@ -218,17 +218,21 @@ class DemoHaloBridge implements HaloBridge {
   }
 
   async simulateSignal(input: SimulateSignalInput): Promise<HaloSnapshot> {
+    const normalized = normalizedDemoState(input.signalKind);
     const existingTask = this.snapshot.tasks.find(
       (candidate) => candidate.taskKey === input.taskKey,
     );
     if (
       existingTask &&
-      input.receivedAtMs < existingTask.lastActiveAtMs
+      (input.receivedAtMs < existingTask.lastActiveAtMs ||
+        (input.receivedAtMs === existingTask.lastActiveAtMs &&
+          normalized.status === existingTask.status &&
+          normalized.source === existingTask.source &&
+          normalized.confidence === existingTask.confidence))
     ) {
       return this.currentSnapshot();
     }
 
-    const normalized = normalizedDemoState(input.signalKind);
     const task: TaskRecord = {
       taskKey: input.taskKey,
       ...normalized,

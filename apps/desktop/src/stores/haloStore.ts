@@ -107,9 +107,7 @@ export function createHaloStore(bridge: HaloBridge = haloBridge) {
     const request = (async () => {
       try {
         const snapshot = await bridge.getSnapshot();
-        if (acceptedSnapshotCount === acceptedCountAtStart) {
-          applySnapshot(snapshot);
-        }
+        applySnapshot(snapshot);
       } catch (error: unknown) {
         if (acceptedSnapshotCount === acceptedCountAtStart) {
           recordError("load", error);

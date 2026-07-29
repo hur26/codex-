@@ -67,12 +67,15 @@ impl HaloEngine {
     }
 
     pub fn apply_signal(&mut self, signal: TaskSignal) {
-        if self
-            .tasks
-            .get(&signal.task_key)
-            .is_some_and(|task| signal.received_at_ms < task.last_active_at_ms)
-        {
-            return;
+        if let Some(task) = self.tasks.get(&signal.task_key) {
+            if signal.received_at_ms < task.last_active_at_ms
+                || (signal.received_at_ms == task.last_active_at_ms
+                    && signal.state.status == task.status
+                    && signal.state.source == task.source
+                    && signal.state.confidence == task.confidence)
+            {
+                return;
+            }
         }
 
         let task_key = signal.task_key;
@@ -782,5 +785,33 @@ mod tests {
         assert_eq!(engine.snapshot().revision, accepted + 1);
         engine.tick(301_001);
         assert_eq!(engine.snapshot().revision, accepted + 1);
+    }
+
+    #[test]
+    fn identical_bound_and_queued_signal_replays_do_not_advance_revision() {
+        let mut engine = HaloEngine::new(300_000);
+        let bound = signal(1, TaskStatus::Running, 100);
+        engine.apply_signal(bound.clone());
+        let bound_revision = engine.snapshot().revision;
+
+        engine.apply_signal(bound);
+        assert_eq!(engine.snapshot().revision, bound_revision);
+
+        for value in 2..=4 {
+            engine.apply_signal(signal(value, TaskStatus::Running, value * 100));
+        }
+        let queued = signal(5, TaskStatus::Waiting, 500);
+        engine.apply_signal(queued.clone());
+        let queued_revision = engine.snapshot().revision;
+
+        engine.apply_signal(queued);
+        assert_eq!(engine.snapshot().revision, queued_revision);
+
+        engine.apply_signal(signal(5, TaskStatus::Running, 500));
+        assert_eq!(
+            engine.snapshot().revision,
+            queued_revision + 1,
+            "same timestamp with a different state is an actual change"
+        );
     }
 }
