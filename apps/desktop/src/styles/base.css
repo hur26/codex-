@@ -439,6 +439,14 @@ button {
     display: flex;
   }
 
+  .task-rail:not(.rail-expanded) .task-rail-content {
+    visibility: hidden;
+  }
+
+  .task-rail.rail-expanded .task-rail-content {
+    visibility: visible;
+  }
+
   .task-rail.rail-expanded {
     transform: translateX(0);
   }

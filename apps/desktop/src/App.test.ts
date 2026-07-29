@@ -1,7 +1,7 @@
-import { flushPromises, mount } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { reactive } from "vue";
+import { nextTick, reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdapterStatus, HaloSnapshot, RingSlot, TaskRecord } from "./types/halo";
 
@@ -42,12 +42,15 @@ import App from "./App.vue";
 import CentralDisplay from "./components/CentralDisplay.vue";
 import CrownControl from "./components/CrownControl.vue";
 import HaloPreview from "./components/HaloPreview.vue";
+import TaskRail from "./components/TaskRail.vue";
 import taskRailSource from "./components/TaskRail.vue?raw";
 
 const baseStyles = readFileSync(
   resolve(process.cwd(), "src/styles/base.css"),
   "utf8",
 );
+
+enableAutoUnmount(afterEach);
 
 function task(
   index: number,
@@ -126,6 +129,7 @@ describe("App control center", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     document.body.innerHTML = "";
   });
 
@@ -139,6 +143,23 @@ describe("App control center", () => {
 
     wrapper.unmount();
     expect(stopMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("每 30 秒老化最近活动时间，并在卸载时清理时钟", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    const wrapper = mount(App);
+    const rail = wrapper.findComponent(TaskRail);
+
+    expect(rail.props("nowMs")).toBe(1_000_000);
+    expect(vi.getTimerCount()).toBe(1);
+
+    vi.advanceTimersByTime(30_000);
+    await nextTick();
+    expect(rail.props("nowMs")).toBe(1_030_000);
+
+    wrapper.unmount();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("顶部明确显示虚拟设备与适配器状态，并组合完整控制中心", () => {

@@ -192,7 +192,7 @@ function selectSlot(slot: RingSlot) {
         <ol class="queue-list">
           <li
             v-for="(queuedTask, index) in queue"
-            :key="index"
+            :key="queuedTask.taskKey"
             class="queue-row status-queued"
             data-queue-task
           >
@@ -497,5 +497,27 @@ function selectSlot(slot: RingSlot) {
   font-family: var(--halo-font-mono);
   font-size: 0.54rem;
   letter-spacing: 0.08em;
+}
+
+@media (forced-colors: active) {
+  .task-row,
+  .rail-toggle {
+    border-color: ButtonText;
+    color: ButtonText;
+    background: Canvas;
+  }
+
+  .task-row:focus-visible,
+  .rail-toggle:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-row,
+  .rail-toggle {
+    transition: none;
+  }
 }
 </style>

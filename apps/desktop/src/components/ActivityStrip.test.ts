@@ -2,6 +2,7 @@ import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import type { RingSlot, TaskRecord } from "../types/halo";
 import ActivityStrip from "./ActivityStrip.vue";
+import componentSource from "./ActivityStrip.vue?raw";
 
 const tasks: TaskRecord[] = [
   {
@@ -63,5 +64,10 @@ describe("ActivityStrip", () => {
     expect(wrapper.get("[data-activity-strip]").text()).toContain(
       "等待状态信号",
     );
+  });
+
+  it("活动事件使用稳定任务主键作为 VDOM key 且不渲染主键", () => {
+    expect(componentSource).toContain(':key="event.taskKey"');
+    expect(componentSource).not.toContain(':key="index"');
   });
 });

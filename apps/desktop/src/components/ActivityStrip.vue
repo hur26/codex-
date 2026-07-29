@@ -46,6 +46,7 @@ const recentEvents = computed(() =>
           : `U${String(anonymousIndex + 1).padStart(2, "0")}`;
 
       return {
+        taskKey: task.taskKey,
         label,
         status: queueIndex >= 0 ? ("queued" as const) : task.status,
         source: task.source === "hook" ? "HOOK" : "SIM",
@@ -93,8 +94,8 @@ function activityLabel(lastActiveAtMs: number) {
 
     <ol v-if="recentEvents.length" class="activity-events">
       <li
-        v-for="(event, index) in recentEvents"
-        :key="index"
+        v-for="event in recentEvents"
+        :key="event.taskKey"
         class="activity-event"
         :class="statusClass(event.status)"
         data-activity-event

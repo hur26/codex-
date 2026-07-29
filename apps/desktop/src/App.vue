@@ -17,6 +17,7 @@ const store = createHaloStore();
 const selectedSlot = ref<number | null>(null);
 const displayMode = ref<DisplayMode>("ambient");
 const renderedAtMs = ref(Date.now());
+let activityClock: number | null = null;
 
 const ADAPTER_LABELS: Record<AdapterState, string> = {
   online: "ONLINE",
@@ -62,12 +63,19 @@ function updateDisplayMode(mode: DisplayMode) {
 
 onMounted(() => {
   renderedAtMs.value = Date.now();
+  activityClock = window.setInterval(() => {
+    renderedAtMs.value = Date.now();
+  }, 30_000);
   void store.load();
   void store.refreshAdapterStatus();
   void store.start();
 });
 
 onUnmounted(() => {
+  if (activityClock !== null) {
+    window.clearInterval(activityClock);
+    activityClock = null;
+  }
   void store.stop();
 });
 </script>

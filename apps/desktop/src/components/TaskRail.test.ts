@@ -184,4 +184,41 @@ describe("TaskRail", () => {
     expect(baseStyles).toMatch(/\.app-main\s*\{[\s\S]*min-height:\s*0/);
     expect(baseStyles).toMatch(/\.device-stage\s*\{[\s\S]*min-height:\s*0/);
   });
+
+  it("仅在紧凑断点隐藏折叠内容，并在展开后恢复键盘与辅助技术可见性", () => {
+    const compactMediaRule = baseStyles.match(
+      /@media \(max-width: 1179px\) \{([\s\S]*?)(?=\n@media \(max-width: 700px\))/,
+    )?.[1];
+
+    expect(compactMediaRule).toMatch(
+      /\.task-rail:not\(\.rail-expanded\) \.task-rail-content\s*\{[\s\S]*visibility:\s*hidden/,
+    );
+    expect(compactMediaRule).toMatch(
+      /\.task-rail\.rail-expanded \.task-rail-content\s*\{[\s\S]*visibility:\s*visible/,
+    );
+    expect(
+      baseStyles.slice(0, baseStyles.indexOf("@media (max-width: 1179px)")),
+    ).not.toMatch(/\.task-rail-content\s*\{[\s\S]*visibility:\s*hidden/);
+  });
+
+  it("任务行与抽屉按钮支持强制色焦点，并在 reduced motion 下关闭过渡", () => {
+    expect(componentSource).toContain("@media (forced-colors: active)");
+    expect(componentSource).toMatch(
+      /forced-colors:[\s\S]*\.task-row[\s\S]*\.rail-toggle[\s\S]*outline:\s*2px solid Highlight/,
+    );
+    expect(componentSource).toContain(
+      "@media (prefers-reduced-motion: reduce)",
+    );
+    expect(componentSource).toMatch(
+      /prefers-reduced-motion:[\s\S]*\.task-row[\s\S]*transition:\s*none/,
+    );
+    expect(baseStyles).toMatch(
+      /prefers-reduced-motion:[\s\S]*\.task-rail[\s\S]*transition:\s*none/,
+    );
+  });
+
+  it("等待队列使用稳定任务主键作为 VDOM key，但不输出到 HTML", () => {
+    expect(componentSource).toContain(':key="queuedTask.taskKey"');
+    expect(componentSource).not.toContain(':key="index"');
+  });
 });
