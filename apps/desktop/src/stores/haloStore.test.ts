@@ -517,6 +517,78 @@ describe("createHaloStore", () => {
     expect(store.state.snapshot).toBe(snapshotBeforeStatus);
   });
 
+  it("实时适配器状态不会被后续读取失败覆盖或污染同 revision 裁决", async () => {
+    let adapterListener: ((status: AdapterStatus) => void) | undefined;
+    const lockedSnapshot: HaloSnapshot = {
+      ...RUNNING_SNAPSHOT,
+      slots: RUNNING_SNAPSHOT.slots.map((slot) =>
+        slot.index === 0
+          ? {
+              ...slot,
+              bindingMode: "manual" as const,
+              locked: true,
+            }
+          : slot,
+      ),
+    };
+    const bridge = createStubBridge({
+      getSnapshot: async () => lockedSnapshot,
+      getAdapterStatus: async () => {
+        throw { code: "adapterReadFailed" };
+      },
+      subscribeAdapterStatus: async (listener) => {
+        adapterListener = listener;
+        return () => undefined;
+      },
+    });
+    const store = createHaloStore(bridge);
+    await store.load();
+    const snapshotBeforeStatus = store.state.snapshot;
+    await store.start();
+
+    adapterListener?.({
+      revision: 4,
+      state: "online",
+      mode: "hook",
+      message: null,
+      acceptedEvents: 4,
+      ignoredEvents: 0,
+      rejectedEvents: 0,
+    });
+    await store.refreshAdapterStatus();
+
+    expect(store.state.adapterStatus).toMatchObject({
+      revision: 4,
+      state: "online",
+      acceptedEvents: 4,
+    });
+    expect(store.state.error).toMatchObject({
+      operation: "adapterStatus",
+      code: "adapterReadFailed",
+    });
+    expect(store.state.snapshot).toBe(snapshotBeforeStatus);
+    expect(store.state.snapshot?.slots[0]).toMatchObject({
+      bindingMode: "manual",
+      locked: true,
+    });
+
+    adapterListener?.({
+      revision: 4,
+      state: "degraded",
+      mode: "hook",
+      message: "同 revision 冲突状态",
+      acceptedEvents: 5,
+      ignoredEvents: 0,
+      rejectedEvents: 1,
+    });
+    expect(store.state.adapterStatus).toMatchObject({
+      revision: 4,
+      state: "online",
+      acceptedEvents: 4,
+    });
+    expect(store.state.snapshot).toBe(snapshotBeforeStatus);
+  });
+
   it("非 Tauri 环境使用确定性的演示 bridge 且不误调用 IPC", async () => {
     const bridge = createHaloBridge();
     const initial = await bridge.getSnapshot();

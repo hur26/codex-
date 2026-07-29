@@ -151,15 +151,17 @@ export function createHaloStore(bridge: HaloBridge = haloBridge) {
       applyAdapterStatus(await bridge.getAdapterStatus());
     } catch (error: unknown) {
       if (acceptedAdapterStatusCount === acceptedCountAtStart) {
-        state.adapterStatus = {
-          revision: state.adapterStatus.revision,
-          state: "offline",
-          mode: "hook",
-          message: "无法读取适配器状态",
-          acceptedEvents: 0,
-          ignoredEvents: 0,
-          rejectedEvents: 0,
-        };
+        if (acceptedAdapterStatusCount === 0) {
+          state.adapterStatus = {
+            revision: state.adapterStatus.revision,
+            state: "offline",
+            mode: "hook",
+            message: "无法读取适配器状态",
+            acceptedEvents: 0,
+            ignoredEvents: 0,
+            rejectedEvents: 0,
+          };
+        }
         recordError("adapterStatus", error);
       }
     }
