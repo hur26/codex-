@@ -540,7 +540,18 @@ function ringStyle(slot: RingSlot): CSSProperties {
 @media (max-width: 520px) {
   .slot-index,
   .confidence-marker {
-    display: none;
+    font-size: clamp(0.36rem, 1.75vw, 0.46rem);
+    letter-spacing: 0.035em;
+  }
+
+  .slot-index {
+    left: calc(var(--halo-ring-width) * -0.7);
+    transform: translate(-100%, -50%);
+  }
+
+  .confidence-marker {
+    top: calc(var(--halo-ring-width) * -0.65);
+    padding: 0.12rem 0.2rem;
   }
 }
 

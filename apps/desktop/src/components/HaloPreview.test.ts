@@ -170,4 +170,16 @@ describe("HaloPreview", () => {
     expect(componentSource).toContain("var(--halo-ring-gap)");
     expect(componentSource).toContain("var(--halo-motion-running)");
   });
+
+  it("小屏仍保留圈号与 provisional 标记可见", () => {
+    const compactMediaRule = componentSource.match(
+      /@media \(max-width: 520px\) \{([\s\S]*?)\n\}/,
+    )?.[1];
+
+    expect(compactMediaRule).toContain(".slot-index");
+    expect(compactMediaRule).toContain(".confidence-marker");
+    expect(compactMediaRule).not.toMatch(
+      /(?:display:\s*none|visibility:\s*hidden|opacity:\s*0)/,
+    );
+  });
 });
