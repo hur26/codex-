@@ -37,7 +37,7 @@ const {
     createHaloStoreMock: vi.fn(),
     loadMock: vi.fn(() => Promise.resolve()),
     refreshAdapterStatusMock: vi.fn(() => Promise.resolve()),
-    startMock: vi.fn(() => Promise.resolve()),
+    startMock: vi.fn(() => Promise.resolve(true)),
     stopMock: vi.fn(() => Promise.resolve()),
     setGlobalBrightnessMock: vi.fn(),
     updateEffectMock: vi.fn(),
@@ -156,7 +156,7 @@ describe("EffectEditor", () => {
     }
     loadMock.mockResolvedValue(undefined);
     refreshAdapterStatusMock.mockResolvedValue(undefined);
-    startMock.mockResolvedValue(undefined);
+    startMock.mockResolvedValue(true);
     stopMock.mockResolvedValue(undefined);
 
     mountedState = reactive(fakeState);

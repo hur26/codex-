@@ -54,6 +54,7 @@ impl AppState {
             Ok(handle) => *worker_handle = Some(handle),
             Err(_) => {
                 if let Ok(mut status) = self.adapter_status.lock() {
+                    status.revision = status.revision.saturating_add(1);
                     status.state = AdapterState::Degraded;
                     status.message = Some("Hook 事件监听无法启动".to_owned());
                     status.rejected_events = status.rejected_events.saturating_add(1);
@@ -92,9 +93,9 @@ fn run_probe_worker<R: Runtime>(
     let mut adapter = ProbeAdapter::new(probe_dir);
     while !stop.load(Ordering::Acquire) {
         let batch = adapter.poll();
-        if let Ok(mut status) = adapter_status.lock() {
-            *status = batch.status;
-        }
+        publish_adapter_status(&adapter_status, batch.status, |status| {
+            let _ = app_handle.emit("halo://adapter-status", status);
+        });
 
         let now_ms = unix_time_ms();
         let changed_snapshot = apply_probe_batch(&engine, batch.signals, now_ms);
@@ -107,6 +108,25 @@ fn run_probe_worker<R: Runtime>(
         }
         thread::park_timeout(POLL_INTERVAL);
     }
+}
+
+fn publish_adapter_status(
+    adapter_status: &Mutex<AdapterStatus>,
+    mut observed: AdapterStatus,
+    emit: impl FnOnce(AdapterStatus),
+) {
+    let changed = {
+        let Ok(mut current) = adapter_status.lock() else {
+            return;
+        };
+        if current.same_payload(&observed) {
+            return;
+        }
+        observed.revision = current.revision.saturating_add(1);
+        *current = observed.clone();
+        observed
+    };
+    emit(changed);
 }
 
 fn apply_probe_batch(
@@ -170,6 +190,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(status).unwrap(),
             serde_json::json!({
+                "revision": 0,
                 "state": "offline",
                 "mode": "hook",
                 "message": "Hook 事件目录不可用",
@@ -178,5 +199,44 @@ mod tests {
                 "rejectedEvents": 0
             })
         );
+    }
+
+    #[test]
+    fn adapter_status_is_emitted_only_for_semantic_changes_and_outside_the_lock() {
+        let shared = Mutex::new(AdapterStatus::offline());
+        let observed = AdapterStatus {
+            revision: 0,
+            state: AdapterState::Online,
+            mode: crate::probe_adapter::AdapterMode::Hook,
+            message: None,
+            accepted_events: 1,
+            ignored_events: 0,
+            rejected_events: 0,
+        };
+        let mut emitted = Vec::new();
+
+        publish_adapter_status(&shared, observed.clone(), |status| {
+            assert!(
+                shared.try_lock().is_ok(),
+                "adapter status must be emitted after releasing its mutex"
+            );
+            emitted.push(status);
+        });
+        publish_adapter_status(&shared, observed.clone(), |status| {
+            emitted.push(status);
+        });
+        publish_adapter_status(
+            &shared,
+            AdapterStatus {
+                accepted_events: 2,
+                ..observed
+            },
+            |status| emitted.push(status),
+        );
+
+        assert_eq!(emitted.len(), 2);
+        assert_eq!(emitted[0].revision, 1);
+        assert_eq!(emitted[1].revision, 2);
+        assert_eq!(shared.lock().unwrap().revision, 2);
     }
 }

@@ -205,6 +205,18 @@ body {
   --adapter-color: var(--halo-unknown);
 }
 
+@media (forced-colors: active) {
+  .adapter-state {
+    border-color: CanvasText;
+    forced-color-adjust: auto;
+  }
+
+  .adapter-state > i {
+    background: currentcolor;
+    box-shadow: none;
+  }
+}
+
 .system-notice {
   position: absolute;
   z-index: 90;

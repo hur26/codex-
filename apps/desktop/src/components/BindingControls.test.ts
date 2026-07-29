@@ -37,7 +37,7 @@ const {
     createHaloStoreMock: vi.fn(),
     loadMock: vi.fn(() => Promise.resolve()),
     refreshAdapterStatusMock: vi.fn(() => Promise.resolve()),
-    startMock: vi.fn(() => Promise.resolve()),
+    startMock: vi.fn(() => Promise.resolve(true)),
     stopMock: vi.fn(() => Promise.resolve()),
     manualBindMock: vi.fn(() => Promise.resolve(state.snapshot)),
     swapSlotsMock: vi.fn(() => Promise.resolve(state.snapshot)),

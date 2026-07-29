@@ -21,6 +21,9 @@ export interface HaloBridge {
   subscribeSnapshots(
     listener: (snapshot: HaloSnapshot) => void,
   ): Promise<() => void>;
+  subscribeAdapterStatus(
+    listener: (status: AdapterStatus) => void,
+  ): Promise<() => void>;
   getAdapterStatus(): Promise<AdapterStatus>;
   simulateSignal(input: SimulateSignalInput): Promise<HaloSnapshot>;
   manualBind(input: ManualBindInput): Promise<HaloSnapshot>;
@@ -39,6 +42,14 @@ class TauriHaloBridge implements HaloBridge {
     listener: (snapshot: HaloSnapshot) => void,
   ): Promise<() => void> {
     return listen<HaloSnapshot>("halo://snapshot", (event) => {
+      listener(event.payload);
+    });
+  }
+
+  async subscribeAdapterStatus(
+    listener: (status: AdapterStatus) => void,
+  ): Promise<() => void> {
+    return listen<AdapterStatus>("halo://adapter-status", (event) => {
       listener(event.payload);
     });
   }
@@ -80,6 +91,7 @@ const DEFAULT_EFFECT: EffectProfile = {
 };
 
 const DEMO_ADAPTER_STATUS: AdapterStatus = {
+  revision: 1,
   state: "degraded",
   mode: "demo",
   message: "浏览器演示模式：未连接 Codex Hook",
@@ -197,6 +209,9 @@ class DemoHaloBridge implements HaloBridge {
   private snapshot = initialDemoSnapshot();
   private readonly queue: TaskKey[] = [];
   private readonly listeners = new Set<(snapshot: HaloSnapshot) => void>();
+  private readonly adapterStatusListeners = new Set<
+    (status: AdapterStatus) => void
+  >();
 
   async getSnapshot(): Promise<HaloSnapshot> {
     return this.currentSnapshot();
@@ -212,6 +227,20 @@ class DemoHaloBridge implements HaloBridge {
       if (active) {
         active = false;
         this.listeners.delete(listener);
+      }
+    };
+  }
+
+  async subscribeAdapterStatus(
+    listener: (status: AdapterStatus) => void,
+  ): Promise<() => void> {
+    this.adapterStatusListeners.add(listener);
+    let active = true;
+
+    return () => {
+      if (active) {
+        active = false;
+        this.adapterStatusListeners.delete(listener);
       }
     };
   }

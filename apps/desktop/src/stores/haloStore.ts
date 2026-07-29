@@ -33,6 +33,7 @@ export interface HaloStoreState {
 }
 
 const INITIAL_ADAPTER_STATUS: AdapterStatus = {
+  revision: 0,
   state: "offline",
   mode: "hook",
   message: "适配器状态尚未读取",
@@ -76,11 +77,13 @@ export function createHaloStore(bridge: HaloBridge = haloBridge) {
       state.snapshot?.slots.filter((slot) => slot.taskKey !== null).length ?? 0,
   );
 
-  let unlisten: (() => void) | null = null;
+  let snapshotUnlisten: (() => void) | null = null;
+  let adapterStatusUnlisten: (() => void) | null = null;
   let desiredRunning = false;
   let lifecycleGeneration = 0;
-  let lifecyclePromise = Promise.resolve();
+  let lifecyclePromise: Promise<boolean> = Promise.resolve(false);
   let acceptedSnapshotCount = 0;
+  let acceptedAdapterStatusCount = 0;
   let loadPromise: Promise<void> | null = null;
 
   function recordError(operation: HaloStoreOperation, error: unknown): void {
@@ -96,6 +99,21 @@ export function createHaloStore(bridge: HaloBridge = haloBridge) {
     }
     state.snapshot = snapshot;
     acceptedSnapshotCount += 1;
+    return true;
+  }
+
+  function applyAdapterStatus(status: AdapterStatus): boolean {
+    if (
+      acceptedAdapterStatusCount > 0 &&
+      status.revision <= state.adapterStatus.revision
+    ) {
+      return false;
+    }
+    if (status.revision < state.adapterStatus.revision) {
+      return false;
+    }
+    state.adapterStatus = status;
+    acceptedAdapterStatusCount += 1;
     return true;
   }
 
@@ -128,61 +146,101 @@ export function createHaloStore(bridge: HaloBridge = haloBridge) {
   }
 
   async function refreshAdapterStatus(): Promise<void> {
+    const acceptedCountAtStart = acceptedAdapterStatusCount;
     try {
-      state.adapterStatus = await bridge.getAdapterStatus();
+      applyAdapterStatus(await bridge.getAdapterStatus());
     } catch (error: unknown) {
-      state.adapterStatus = {
-        state: "offline",
-        mode: "hook",
-        message: "无法读取适配器状态",
-        acceptedEvents: 0,
-        ignoredEvents: 0,
-        rejectedEvents: 0,
-      };
-      recordError("adapterStatus", error);
+      if (acceptedAdapterStatusCount === acceptedCountAtStart) {
+        state.adapterStatus = {
+          revision: state.adapterStatus.revision,
+          state: "offline",
+          mode: "hook",
+          message: "无法读取适配器状态",
+          acceptedEvents: 0,
+          ignoredEvents: 0,
+          rejectedEvents: 0,
+        };
+        recordError("adapterStatus", error);
+      }
     }
   }
 
   function scheduleSubscription(
     targetRunning: boolean,
     generation: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const transition = async () => {
       if (!targetRunning) {
-        const cleanup = unlisten;
-        unlisten = null;
-        cleanup?.();
-        return;
+        const cleanupSnapshot = snapshotUnlisten;
+        const cleanupAdapterStatus = adapterStatusUnlisten;
+        snapshotUnlisten = null;
+        adapterStatusUnlisten = null;
+        cleanupSnapshot?.();
+        cleanupAdapterStatus?.();
+        return false;
       }
 
-      if (unlisten) {
-        return;
+      if (snapshotUnlisten && adapterStatusUnlisten) {
+        return true;
       }
 
-      try {
-        const cleanup = await bridge.subscribeSnapshots((snapshot) => {
+      const [snapshotResult, adapterStatusResult] = await Promise.allSettled([
+        bridge.subscribeSnapshots((snapshot) => {
           if (desiredRunning && lifecycleGeneration === generation) {
             applySnapshot(snapshot);
           }
-        });
-        if (!desiredRunning || lifecycleGeneration !== generation) {
-          cleanup();
-          return;
-        }
-        unlisten = cleanup;
-      } catch (error: unknown) {
-        if (desiredRunning && lifecycleGeneration === generation) {
+        }),
+        bridge.subscribeAdapterStatus((status) => {
+          if (desiredRunning && lifecycleGeneration === generation) {
+            applyAdapterStatus(status);
+          }
+        }),
+      ]);
+      const cleanupSnapshot =
+        snapshotResult.status === "fulfilled" ? snapshotResult.value : null;
+      const cleanupAdapterStatus =
+        adapterStatusResult.status === "fulfilled"
+          ? adapterStatusResult.value
+          : null;
+      const subscriptionFailed =
+        snapshotResult.status === "rejected" ||
+        adapterStatusResult.status === "rejected";
+
+      if (
+        subscriptionFailed ||
+        !desiredRunning ||
+        lifecycleGeneration !== generation
+      ) {
+        cleanupSnapshot?.();
+        cleanupAdapterStatus?.();
+        if (
+          subscriptionFailed &&
+          desiredRunning &&
+          lifecycleGeneration === generation
+        ) {
           desiredRunning = false;
-          recordError("subscribe", error);
+          recordError(
+            "subscribe",
+            snapshotResult.status === "rejected"
+              ? snapshotResult.reason
+              : adapterStatusResult.status === "rejected"
+                ? adapterStatusResult.reason
+                : undefined,
+          );
         }
+        return false;
       }
+
+      snapshotUnlisten = cleanupSnapshot;
+      adapterStatusUnlisten = cleanupAdapterStatus;
+      return true;
     };
 
     lifecyclePromise = lifecyclePromise.then(transition, transition);
     return lifecyclePromise;
   }
 
-  function start(): Promise<void> {
+  function start(): Promise<boolean> {
     if (desiredRunning) {
       return lifecyclePromise;
     }
@@ -191,8 +249,8 @@ export function createHaloStore(bridge: HaloBridge = haloBridge) {
     return scheduleSubscription(true, lifecycleGeneration);
   }
 
-  function stop(): Promise<void> {
-    if (!desiredRunning && !unlisten) {
+  function stop(): Promise<boolean> {
+    if (!desiredRunning && !snapshotUnlisten && !adapterStatusUnlisten) {
       return lifecyclePromise;
     }
     desiredRunning = false;

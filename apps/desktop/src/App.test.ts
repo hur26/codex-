@@ -31,7 +31,7 @@ const {
     createHaloStoreMock: vi.fn(),
     loadMock: vi.fn(() => Promise.resolve()),
     refreshAdapterStatusMock: vi.fn(() => Promise.resolve()),
-    startMock: vi.fn(() => Promise.resolve()),
+    startMock: vi.fn(() => Promise.resolve(true)),
     stopMock: vi.fn(() => Promise.resolve()),
     fakeState: state,
   };
@@ -113,6 +113,7 @@ describe("App control center", () => {
   beforeEach(() => {
     fakeState.snapshot = snapshot;
     fakeState.adapterStatus = {
+      revision: 1,
       state: "degraded",
       mode: "demo",
       message: "浏览器演示模式",
@@ -215,6 +216,7 @@ describe("App control center", () => {
     ["offline", "OFFLINE"],
   ] as const)("可辨认适配器 %s 状态", (state, label) => {
     fakeState.adapterStatus = {
+      revision: 2,
       state,
       mode: "hook",
       message: null,
@@ -235,6 +237,7 @@ describe("App control center", () => {
       message: "load 操作失败",
     };
     fakeState.adapterStatus = {
+      revision: 1,
       state: "offline",
       mode: "demo",
       message: "未连接 Hook",

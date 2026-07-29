@@ -29,6 +29,7 @@ pub enum AdapterMode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdapterStatus {
+    pub revision: u64,
     pub state: AdapterState,
     pub mode: AdapterMode,
     pub message: Option<String>,
@@ -40,6 +41,7 @@ pub struct AdapterStatus {
 impl AdapterStatus {
     pub fn offline() -> Self {
         Self {
+            revision: 0,
             state: AdapterState::Offline,
             mode: AdapterMode::Hook,
             message: Some("Hook 事件目录不可用".to_owned()),
@@ -47,6 +49,15 @@ impl AdapterStatus {
             ignored_events: 0,
             rejected_events: 0,
         }
+    }
+
+    pub fn same_payload(&self, other: &Self) -> bool {
+        self.state == other.state
+            && self.mode == other.mode
+            && self.message == other.message
+            && self.accepted_events == other.accepted_events
+            && self.ignored_events == other.ignored_events
+            && self.rejected_events == other.rejected_events
     }
 }
 
@@ -184,6 +195,7 @@ impl ProbeAdapter {
             AdapterState::Offline => Some("Hook 事件目录不可用".to_owned()),
         };
         AdapterStatus {
+            revision: 0,
             state,
             mode: AdapterMode::Hook,
             message,

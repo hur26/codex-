@@ -75,6 +75,7 @@ const RUNNING_SNAPSHOT: HaloSnapshot = {
 };
 
 const ONLINE_STATUS: AdapterStatus = {
+  revision: 1,
   state: "online",
   mode: "hook",
   message: null,
@@ -89,6 +90,7 @@ function createStubBridge(
   return {
     getSnapshot: async () => EMPTY_SNAPSHOT,
     subscribeSnapshots: async () => () => undefined,
+    subscribeAdapterStatus: async () => () => undefined,
     getAdapterStatus: async () => ONLINE_STATUS,
     simulateSignal: async () => RUNNING_SNAPSHOT,
     manualBind: async () => RUNNING_SNAPSHOT,
@@ -270,6 +272,29 @@ describe("createHaloStore", () => {
     expect(secondUnlistens).toBe(1);
   });
 
+  it("任一实时订阅失败时清理已注册的另一监听器", async () => {
+    let snapshotUnlistens = 0;
+    const bridge = createStubBridge({
+      subscribeSnapshots: async () => () => {
+        snapshotUnlistens += 1;
+      },
+      subscribeAdapterStatus: async () => {
+        throw { code: "adapterSubscriptionFailed" };
+      },
+    });
+    const store = createHaloStore(bridge);
+
+    await store.start();
+    await store.stop();
+
+    expect(snapshotUnlistens).toBe(1);
+    expect(store.state.error).toStrictEqual({
+      operation: "subscribe",
+      code: "adapterSubscriptionFailed",
+      message: "subscribe 操作失败",
+    });
+  });
+
   it("并发 load 共享请求且事件新快照不会被旧 load 结果覆盖", async () => {
     const pendingLoad = deferred<HaloSnapshot>();
     let loadRequests = 0;
@@ -420,6 +445,7 @@ describe("createHaloStore", () => {
     async (state) => {
       const bridge = createStubBridge({
         getAdapterStatus: async () => ({
+          revision: 1,
           state,
           mode: "hook",
           message: state === "online" ? null : `${state} diagnostic`,
@@ -433,6 +459,7 @@ describe("createHaloStore", () => {
       await store.refreshAdapterStatus();
 
       expect(store.state.adapterStatus).toStrictEqual({
+        revision: 1,
         state,
         mode: "hook",
         message: state === "online" ? null : `${state} diagnostic`,
@@ -443,6 +470,53 @@ describe("createHaloStore", () => {
     },
   );
 
+  it("适配器事件优先于晚到命令状态并拒绝较旧 revision", async () => {
+    let adapterListener: ((status: AdapterStatus) => void) | undefined;
+    const staleStatus: AdapterStatus = {
+      revision: 2,
+      state: "offline",
+      mode: "hook",
+      message: "旧状态",
+      acceptedEvents: 0,
+      ignoredEvents: 0,
+      rejectedEvents: 1,
+    };
+    const bridge = createStubBridge({
+      getSnapshot: async () => RUNNING_SNAPSHOT,
+      getAdapterStatus: async () => staleStatus,
+      subscribeAdapterStatus: async (listener) => {
+        adapterListener = listener;
+        return () => undefined;
+      },
+    });
+    const store = createHaloStore(bridge);
+    await store.load();
+    const snapshotBeforeStatus = store.state.snapshot;
+    await store.start();
+
+    adapterListener?.({
+      revision: 4,
+      state: "online",
+      mode: "hook",
+      message: null,
+      acceptedEvents: 4,
+      ignoredEvents: 0,
+      rejectedEvents: 1,
+    });
+    await store.refreshAdapterStatus();
+    adapterListener?.({
+      ...staleStatus,
+      revision: 3,
+      state: "degraded",
+    });
+
+    expect(store.state.adapterStatus).toMatchObject({
+      revision: 4,
+      state: "online",
+    });
+    expect(store.state.snapshot).toBe(snapshotBeforeStatus);
+  });
+
   it("非 Tauri 环境使用确定性的演示 bridge 且不误调用 IPC", async () => {
     const bridge = createHaloBridge();
     const initial = await bridge.getSnapshot();
@@ -452,6 +526,7 @@ describe("createHaloStore", () => {
     expect(initial.slots).toHaveLength(4);
     expect(initial.slots.every((slot) => slot.taskKey === null)).toBe(true);
     expect(status).toEqual({
+      revision: 1,
       state: "degraded",
       mode: "demo",
       message: "浏览器演示模式：未连接 Codex Hook",
@@ -587,6 +662,7 @@ describe("TauriHaloBridge", () => {
 
     await bridge.getSnapshot();
     await bridge.subscribeSnapshots(() => undefined);
+    await bridge.subscribeAdapterStatus(() => undefined);
     await bridge.getAdapterStatus();
     await bridge.simulateSignal(signal);
     await bridge.manualBind(binding);
@@ -607,6 +683,10 @@ describe("TauriHaloBridge", () => {
     ]);
     expect(listenMock).toHaveBeenCalledWith(
       "halo://snapshot",
+      expect.any(Function),
+    );
+    expect(listenMock).toHaveBeenCalledWith(
+      "halo://adapter-status",
       expect.any(Function),
     );
   });

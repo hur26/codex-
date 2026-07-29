@@ -13,15 +13,22 @@ import type {
 const {
   getSnapshotMock,
   subscribeSnapshotsMock,
+  subscribeAdapterStatusMock,
   getAdapterStatusMock,
   unlistenMock,
+  adapterUnlistenMock,
   fakeBridge,
   subscription,
+  adapterSubscription,
 } = vi.hoisted(() => {
   const currentSubscription = {
     listener: undefined as ((snapshot: HaloSnapshot) => void) | undefined,
   };
-  const stopListening = vi.fn();
+  const currentAdapterSubscription = {
+    listener: undefined as ((status: AdapterStatus) => void) | undefined,
+  };
+  const stopListening: () => void = vi.fn();
+  const stopAdapterListening: () => void = vi.fn();
   const getSnapshot = vi.fn();
   const getAdapterStatus = vi.fn();
   const subscribeSnapshots = vi.fn(
@@ -30,16 +37,26 @@ const {
       return stopListening;
     },
   );
+  const subscribeAdapterStatus = vi.fn(
+    async (listener: (status: AdapterStatus) => void) => {
+      currentAdapterSubscription.listener = listener;
+      return stopAdapterListening;
+    },
+  );
 
   return {
     getSnapshotMock: getSnapshot,
     subscribeSnapshotsMock: subscribeSnapshots,
+    subscribeAdapterStatusMock: subscribeAdapterStatus,
     getAdapterStatusMock: getAdapterStatus,
     unlistenMock: stopListening,
+    adapterUnlistenMock: stopAdapterListening,
     subscription: currentSubscription,
+    adapterSubscription: currentAdapterSubscription,
     fakeBridge: {
       getSnapshot,
       subscribeSnapshots,
+      subscribeAdapterStatus,
       getAdapterStatus,
       simulateSignal: vi.fn(),
       manualBind: vi.fn(),
@@ -56,6 +73,7 @@ vi.mock("./haloBridge", () => ({
 }));
 
 import App from "../App.vue";
+import appSource from "../App.vue?raw";
 import HaloPreview from "../components/HaloPreview.vue";
 import { createHaloStore } from "../stores/haloStore";
 import type { HaloBridge } from "./haloBridge";
@@ -125,13 +143,14 @@ function snapshot(
 
 const INITIAL_SNAPSHOT = snapshot(7, "running", "observed");
 const DEGRADED_STATUS: AdapterStatus = {
+  revision: 2,
   state: "degraded",
   mode: "hook",
   message: "探针目录暂时不可读",
   acceptedEvents: 4,
   ignoredEvents: 1,
   rejectedEvents: 0,
-};
+} as AdapterStatus;
 const baseStyles = readFileSync(
   resolve(process.cwd(), "src/styles/base.css"),
   "utf8",
@@ -140,16 +159,20 @@ const baseStyles = readFileSync(
 describe("Hook 到四环实时集成", () => {
   beforeEach(() => {
     subscription.listener = undefined;
+    adapterSubscription.listener = undefined;
     getSnapshotMock.mockReset();
     getSnapshotMock.mockResolvedValue(INITIAL_SNAPSHOT);
     getAdapterStatusMock.mockReset();
     getAdapterStatusMock.mockResolvedValue(DEGRADED_STATUS);
     subscribeSnapshotsMock.mockClear();
-    unlistenMock.mockClear();
+    subscribeAdapterStatusMock.mockClear();
+    vi.mocked(unlistenMock).mockClear();
+    vi.mocked(adapterUnlistenMock).mockClear();
   });
 
   afterEach(() => {
     subscription.listener = undefined;
+    adapterSubscription.listener = undefined;
     vi.clearAllTimers();
     vi.useRealTimers();
     document.body.innerHTML = "";
@@ -163,13 +186,101 @@ describe("Hook 到四环实时集成", () => {
     expect(getSnapshotMock).toHaveBeenCalledTimes(1);
     expect(getAdapterStatusMock).toHaveBeenCalledTimes(1);
     expect(subscribeSnapshotsMock).toHaveBeenCalledTimes(1);
+    expect(subscribeAdapterStatusMock).toHaveBeenCalledTimes(1);
     expect(subscription.listener).toBeTypeOf("function");
 
     wrapper.unmount();
     await flushPromises();
 
     expect(unlistenMock).toHaveBeenCalledTimes(1);
+    expect(adapterUnlistenMock).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("监听器全部注册后才读取初始状态，期间事件优先于晚到的旧快照", async () => {
+    const snapshotSubscription = deferred<() => void>();
+    const adapterStatusSubscription = deferred<() => void>();
+    const pendingLoad = deferred<HaloSnapshot>();
+    subscribeSnapshotsMock.mockImplementationOnce(async (listener) => {
+      subscription.listener = listener;
+      return snapshotSubscription.promise;
+    });
+    subscribeAdapterStatusMock.mockImplementationOnce(async (listener) => {
+      adapterSubscription.listener = listener;
+      return adapterStatusSubscription.promise;
+    });
+    getSnapshotMock.mockReturnValueOnce(pendingLoad.promise);
+
+    const wrapper = mount(App);
+    await flushPromises();
+    expect(getSnapshotMock).not.toHaveBeenCalled();
+    expect(getAdapterStatusMock).not.toHaveBeenCalled();
+
+    snapshotSubscription.resolve(unlistenMock);
+    await flushPromises();
+    expect(getSnapshotMock).not.toHaveBeenCalled();
+
+    adapterStatusSubscription.resolve(adapterUnlistenMock);
+    await flushPromises();
+    expect(getSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(getAdapterStatusMock).toHaveBeenCalledTimes(1);
+
+    subscription.listener?.(snapshot(8, "waiting", "provisional"));
+    pendingLoad.resolve(INITIAL_SNAPSHOT);
+    await flushPromises();
+
+    expect(wrapper.get('[data-slot="0"]').attributes()).toMatchObject({
+      "data-status": "waiting",
+      "data-source": "hook",
+      "data-confidence": "provisional",
+    });
+
+    wrapper.unmount();
+    await flushPromises();
+    expect(unlistenMock).toHaveBeenCalledTimes(1);
+    expect(adapterUnlistenMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("订阅尚未完成便卸载时清理每个迟到监听器且不再加载", async () => {
+    const snapshotSubscription = deferred<() => void>();
+    const adapterStatusSubscription = deferred<() => void>();
+    subscribeSnapshotsMock.mockImplementationOnce(async (listener) => {
+      subscription.listener = listener;
+      return snapshotSubscription.promise;
+    });
+    subscribeAdapterStatusMock.mockImplementationOnce(async (listener) => {
+      adapterSubscription.listener = listener;
+      return adapterStatusSubscription.promise;
+    });
+
+    const wrapper = mount(App);
+    await flushPromises();
+    wrapper.unmount();
+
+    snapshotSubscription.resolve(unlistenMock);
+    adapterStatusSubscription.resolve(adapterUnlistenMock);
+    await flushPromises();
+
+    expect(unlistenMock).toHaveBeenCalledTimes(1);
+    expect(adapterUnlistenMock).toHaveBeenCalledTimes(1);
+    expect(getSnapshotMock).not.toHaveBeenCalled();
+    expect(getAdapterStatusMock).not.toHaveBeenCalled();
+  });
+
+  it("任一监听注册失败时清理已注册监听器且不读取无保护的初始状态", async () => {
+    subscribeAdapterStatusMock.mockRejectedValueOnce({
+      code: "adapterSubscriptionFailed",
+    });
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(unlistenMock).toHaveBeenCalledTimes(1);
+    expect(getSnapshotMock).not.toHaveBeenCalled();
+    expect(getAdapterStatusMock).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+    await flushPromises();
+    expect(unlistenMock).toHaveBeenCalledTimes(1);
   });
 
   it("新 Hook 快照在一轮 Vue 微任务内更新正确圆环和语义", async () => {
@@ -229,6 +340,9 @@ describe("Hook 到四环实时集成", () => {
       expect(diagnostic.attributes()).toMatchObject({
         "data-adapter-state": adapterState,
         "data-diagnostic-tone": "muted-blue",
+        role: "status",
+        "aria-live": "polite",
+        "aria-atomic": "true",
       });
       expect(diagnostic.attributes("aria-label")).toContain("适配器诊断");
       expect(diagnostic.classes()).toContain(`adapter-${adapterState}`);
@@ -241,8 +355,70 @@ describe("Hook 到四环实时集成", () => {
       expect(baseStyles).toMatch(
         /\.adapter-degraded,\s*\.adapter-offline\s*\{[^}]*--adapter-color:\s*var\(--halo-unknown\)/s,
       );
+      expect(baseStyles).toMatch(/@media\s*\(forced-colors:\s*active\)/);
+      expect(appSource).not.toContain(
+        ':class="`adapter-${store.state.adapterStatus.state}`"',
+      );
 
       wrapper.unmount();
     },
   );
+
+  it("适配器事件实时更新诊断并按 revision 拒绝旧状态，不改写锁定绑定", async () => {
+    const pendingStatus = deferred<AdapterStatus>();
+    getAdapterStatusMock.mockReturnValueOnce(pendingStatus.promise);
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const onlineStatus = {
+      ...DEGRADED_STATUS,
+      revision: 4,
+      state: "online" as const,
+      message: null,
+    };
+    adapterSubscription.listener?.(onlineStatus);
+    await nextTick();
+    expect(
+      wrapper.get("[data-adapter-state]").attributes("data-adapter-state"),
+    ).toBe("online");
+
+    pendingStatus.resolve({
+      ...DEGRADED_STATUS,
+      revision: 3,
+      state: "offline",
+    } as AdapterStatus);
+    await flushPromises();
+    expect(
+      wrapper.get("[data-adapter-state]").attributes("data-adapter-state"),
+    ).toBe("online");
+
+    const degradedStatus = {
+      ...DEGRADED_STATUS,
+      revision: 5,
+      state: "degraded" as const,
+    };
+    adapterSubscription.listener?.(degradedStatus);
+    await nextTick();
+    expect(
+      wrapper.get("[data-adapter-state]").attributes("data-adapter-state"),
+    ).toBe("degraded");
+    expect(wrapper.findComponent(HaloPreview).props("slots")[0]).toMatchObject({
+      index: 0,
+      taskKey: TASK_KEY,
+      bindingMode: "manual",
+      locked: true,
+    });
+
+    wrapper.unmount();
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}

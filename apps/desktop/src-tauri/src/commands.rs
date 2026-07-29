@@ -441,6 +441,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(status).unwrap(),
             serde_json::json!({
+                "revision": 0,
                 "state": "offline",
                 "mode": "hook",
                 "message": "Hook 事件目录不可用",

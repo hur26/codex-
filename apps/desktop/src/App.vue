@@ -32,6 +32,7 @@ const effectBatchError = ref<HaloStoreError | null>(null);
 let activityClock: number | null = null;
 let effectQueueRunning = false;
 let effectQueueMounted = true;
+let mountedGeneration = 0;
 let pendingGlobalBrightness: number | null = null;
 const pendingEffects = new Map<number, UpdateEffectInput>();
 
@@ -39,6 +40,11 @@ const ADAPTER_LABELS: Record<AdapterState, string> = {
   online: "ONLINE",
   degraded: "DEGRADED",
   offline: "OFFLINE",
+};
+const ADAPTER_CLASSES: Record<AdapterState, string> = {
+  online: "adapter-online",
+  degraded: "adapter-degraded",
+  offline: "adapter-offline",
 };
 const adapterDiagnosticTone = computed(() =>
   store.state.adapterStatus.state === "online" ? "nominal" : "muted-blue",
@@ -290,21 +296,34 @@ async function drainEffectQueue() {
   }
 }
 
+async function initializeStore(generation: number) {
+  const subscribed = await store.start();
+  if (
+    !subscribed ||
+    !effectQueueMounted ||
+    mountedGeneration !== generation
+  ) {
+    return;
+  }
+  await Promise.all([store.load(), store.refreshAdapterStatus()]);
+}
+
 onMounted(() => {
   effectQueueMounted = true;
+  mountedGeneration += 1;
+  const generation = mountedGeneration;
   renderedAtMs.value = Date.now();
   activityClock = window.setInterval(() => {
     renderedAtMs.value = Date.now();
   }, 30_000);
-  void store.load();
-  void store.refreshAdapterStatus();
-  void store.start();
+  void initializeStore(generation);
   window.addEventListener("blur", clearActiveDrag);
   window.addEventListener("keydown", handleGlobalKeydown);
 });
 
 onUnmounted(() => {
   effectQueueMounted = false;
+  mountedGeneration += 1;
   pendingGlobalBrightness = null;
   pendingEffects.clear();
   clearActiveDrag();
@@ -368,10 +387,13 @@ watch(
 
       <div
         class="adapter-state"
-        :class="`adapter-${store.state.adapterStatus.state}`"
+        :class="ADAPTER_CLASSES[store.state.adapterStatus.state]"
         :data-adapter-state="store.state.adapterStatus.state"
         :data-diagnostic-tone="adapterDiagnosticTone"
         :aria-label="adapterDiagnosticLabel"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
         :title="store.state.adapterStatus.message ?? undefined"
       >
         <i aria-hidden="true" />

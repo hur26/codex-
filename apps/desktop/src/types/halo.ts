@@ -86,6 +86,7 @@ export type AdapterState = "online" | "degraded" | "offline";
 export type AdapterMode = "hook" | "demo";
 
 export interface AdapterStatus {
+  revision: number;
   state: AdapterState;
   mode: AdapterMode;
   message: string | null;
