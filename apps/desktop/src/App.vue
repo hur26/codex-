@@ -7,7 +7,10 @@ import CrownControl from "./components/CrownControl.vue";
 import EffectEditor from "./components/EffectEditor.vue";
 import HaloPreview from "./components/HaloPreview.vue";
 import TaskRail from "./components/TaskRail.vue";
-import { createHaloStore } from "./stores/haloStore";
+import {
+  createHaloStore,
+  type HaloStoreError,
+} from "./stores/haloStore";
 import type {
   ActiveDrag,
   AdapterState,
@@ -25,6 +28,7 @@ const renderedAtMs = ref(Date.now());
 const activeDrag = ref<ActiveDrag | null>(null);
 const bindingCommandPending = ref(false);
 const effectCommandPending = ref(false);
+const effectBatchError = ref<HaloStoreError | null>(null);
 let activityClock: number | null = null;
 let effectQueueRunning = false;
 let effectQueueMounted = true;
@@ -68,6 +72,9 @@ const selectedTask = computed(
 );
 const occupiedCount = computed(
   () => slots.value.filter((slot) => slot.taskKey !== null).length,
+);
+const visibleAppError = computed(
+  () => store.state.error ?? effectBatchError.value,
 );
 
 function selectSlot(slot: number) {
@@ -209,13 +216,25 @@ function updateDisplayMode(mode: DisplayMode) {
 }
 
 function setGlobalBrightness(value: number) {
+  beginEffectBatch();
   pendingGlobalBrightness = value;
   void drainEffectQueue();
 }
 
 function updateEffect(input: UpdateEffectInput) {
+  beginEffectBatch();
   pendingEffects.set(input.slot, { ...input });
   void drainEffectQueue();
+}
+
+function beginEffectBatch() {
+  if (
+    !effectQueueRunning &&
+    pendingGlobalBrightness === null &&
+    pendingEffects.size === 0
+  ) {
+    effectBatchError.value = null;
+  }
 }
 
 async function drainEffectQueue() {
@@ -232,7 +251,10 @@ async function drainEffectQueue() {
       if (pendingGlobalBrightness !== null) {
         const value = pendingGlobalBrightness;
         pendingGlobalBrightness = null;
-        await store.setGlobalBrightness(value);
+        const result = await store.setGlobalBrightness(value);
+        if (!result && store.state.error) {
+          effectBatchError.value = { ...store.state.error };
+        }
         continue;
       }
 
@@ -243,7 +265,10 @@ async function drainEffectQueue() {
         continue;
       }
       pendingEffects.delete(next[0]);
-      await store.updateEffect(next[1]);
+      const result = await store.updateEffect(next[1]);
+      if (!result && store.state.error) {
+        effectBatchError.value = { ...store.state.error };
+      }
     }
   } finally {
     effectQueueRunning = false;
@@ -358,13 +383,13 @@ watch(
       正在同步虚拟设备快照
     </div>
     <div
-      v-if="store.state.error"
+      v-if="visibleAppError"
       class="system-notice error-notice"
       data-app-error
       role="alert"
     >
       <i aria-hidden="true" />
-      {{ store.state.error.message }}
+      {{ visibleAppError.message }}
     </div>
 
     <main class="app-main">

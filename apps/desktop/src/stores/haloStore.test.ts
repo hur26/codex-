@@ -27,6 +27,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 const EMPTY_SNAPSHOT: HaloSnapshot = {
+  revision: 0,
   deviceMode: "virtual",
   globalBrightness: 100,
   slots: Array.from({ length: 4 }, (_, index) => ({
@@ -50,6 +51,7 @@ const EMPTY_SNAPSHOT: HaloSnapshot = {
 
 const RUNNING_SNAPSHOT: HaloSnapshot = {
   ...EMPTY_SNAPSHOT,
+  revision: 1,
   slots: EMPTY_SNAPSHOT.slots.map((slot) =>
     slot.index === 0
       ? {
@@ -311,6 +313,32 @@ describe("createHaloStore", () => {
     expect(store.state.snapshot).toStrictEqual(RUNNING_SNAPSHOT);
   });
 
+  it("实时事件的新 revision 不会被稍后返回的旧命令快照覆盖", async () => {
+    const pendingCommand = deferred<HaloSnapshot>();
+    let listener: ((snapshot: HaloSnapshot) => void) | undefined;
+    const bridge = createStubBridge({
+      subscribeSnapshots: async (next) => {
+        listener = next;
+        return () => undefined;
+      },
+      setGlobalBrightness: () => pendingCommand.promise,
+    });
+    const store = createHaloStore(bridge);
+    await store.start();
+
+    const command = store.setGlobalBrightness(50);
+    const eventSnapshot = { ...RUNNING_SNAPSHOT, revision: 5 };
+    listener?.(eventSnapshot);
+    pendingCommand.resolve({
+      ...RUNNING_SNAPSHOT,
+      revision: 4,
+      globalBrightness: 50,
+    });
+    await command;
+
+    expect(store.state.snapshot).toStrictEqual(eventSnapshot);
+  });
+
   it.each(["online", "degraded", "offline"] as const)(
     "适配器状态支持 %s",
     async (state) => {
@@ -355,6 +383,51 @@ describe("createHaloStore", () => {
     });
     expect(invokeMock).not.toHaveBeenCalled();
     expect(listenMock).not.toHaveBeenCalled();
+  });
+
+  it("演示 bridge 仅在实际变更或接受信号时递增 revision", async () => {
+    const bridge = createDemoHaloBridge();
+    expect((await bridge.getSnapshot()).revision).toBe(0);
+
+    expect((await bridge.setGlobalBrightness(100)).revision).toBe(0);
+    expect((await bridge.setGlobalBrightness(50)).revision).toBe(1);
+    expect((await bridge.setGlobalBrightness(50)).revision).toBe(1);
+
+    const accepted = await bridge.simulateSignal({
+      taskKey: "0123456789abcdef",
+      signalKind: "userPromptSubmit",
+      receivedAtMs: 42,
+    });
+    expect(accepted.revision).toBe(2);
+    const old = await bridge.simulateSignal({
+      taskKey: "0123456789abcdef",
+      signalKind: "stop",
+      receivedAtMs: 41,
+    });
+    expect(old.revision).toBe(2);
+
+    expect(
+      (
+        await bridge.updateEffect({
+          slot: 0,
+          brightness: 80,
+          speedPercent: 100,
+          direction: "clockwise",
+          tailPercent: 35,
+        })
+      ).revision,
+    ).toBe(2);
+    expect(
+      (
+        await bridge.updateEffect({
+          slot: 0,
+          brightness: 50,
+          speedPercent: 200,
+          direction: "counterClockwise",
+          tailPercent: 50,
+        })
+      ).revision,
+    ).toBe(3);
   });
 });
 

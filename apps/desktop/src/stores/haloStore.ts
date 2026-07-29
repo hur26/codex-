@@ -77,16 +77,23 @@ export function createHaloStore(bridge: HaloBridge = haloBridge) {
   let desiredRunning = false;
   let lifecycleGeneration = 0;
   let lifecyclePromise = Promise.resolve();
-  let snapshotRevision = 0;
+  let acceptedSnapshotCount = 0;
   let loadPromise: Promise<void> | null = null;
 
   function recordError(operation: HaloStoreOperation, error: unknown): void {
     state.error = stableError(operation, error);
   }
 
-  function applySnapshot(snapshot: HaloSnapshot): void {
+  function applySnapshot(snapshot: HaloSnapshot): boolean {
+    if (
+      state.snapshot !== null &&
+      snapshot.revision < state.snapshot.revision
+    ) {
+      return false;
+    }
     state.snapshot = snapshot;
-    snapshotRevision += 1;
+    acceptedSnapshotCount += 1;
+    return true;
   }
 
   function load(): Promise<void> {
@@ -96,15 +103,15 @@ export function createHaloStore(bridge: HaloBridge = haloBridge) {
 
     state.loading = true;
     state.error = null;
-    const revisionAtStart = snapshotRevision;
+    const acceptedCountAtStart = acceptedSnapshotCount;
     const request = (async () => {
       try {
         const snapshot = await bridge.getSnapshot();
-        if (snapshotRevision === revisionAtStart) {
+        if (acceptedSnapshotCount === acceptedCountAtStart) {
           applySnapshot(snapshot);
         }
       } catch (error: unknown) {
-        if (snapshotRevision === revisionAtStart) {
+        if (acceptedSnapshotCount === acceptedCountAtStart) {
           recordError("load", error);
         }
       }

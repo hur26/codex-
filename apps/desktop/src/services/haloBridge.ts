@@ -100,6 +100,7 @@ function emptySlot(index: number): RingSlot {
 
 function initialDemoSnapshot(): HaloSnapshot {
   return {
+    revision: 0,
     deviceMode: "virtual",
     globalBrightness: 100,
     slots: Array.from({ length: 4 }, (_, index) => emptySlot(index)),
@@ -267,7 +268,7 @@ class DemoHaloBridge implements HaloBridge {
       }
     }
 
-    return this.publish();
+    return this.publishChanged();
   }
 
   async manualBind(input: ManualBindInput): Promise<HaloSnapshot> {
@@ -277,9 +278,11 @@ class DemoHaloBridge implements HaloBridge {
       (slot) => slot.taskKey === task.taskKey,
     );
     if (current?.index === target.index) {
+      const changed =
+        target.bindingMode !== "manual" || target.locked !== input.lock;
       Object.assign(target, slotFromTask(target, task, "manual", input.lock));
       this.removeFromQueue(task.taskKey);
-      return this.publish();
+      return changed ? this.publishChanged() : this.currentSnapshot();
     }
 
     const displacedTaskKey =
@@ -296,7 +299,7 @@ class DemoHaloBridge implements HaloBridge {
     }
     this.fillEmptySlotsFromQueue();
 
-    return this.publish();
+    return this.publishChanged();
   }
 
   async toggleLock(slot: number): Promise<HaloSnapshot> {
@@ -305,12 +308,15 @@ class DemoHaloBridge implements HaloBridge {
       throw { code: "emptySlot", slot };
     }
     target.locked = !target.locked;
-    return this.publish();
+    return this.publishChanged();
   }
 
   async swapSlots(left: number, right: number): Promise<HaloSnapshot> {
     const leftSlot = assertSlot(this.snapshot, left);
     const rightSlot = assertSlot(this.snapshot, right);
+    if (left === right || sameSlotAssignment(leftSlot, rightSlot)) {
+      return this.currentSnapshot();
+    }
     const leftEffect = { ...leftSlot.effect };
     const rightEffect = { ...rightSlot.effect };
 
@@ -324,26 +330,34 @@ class DemoHaloBridge implements HaloBridge {
       index: right,
       effect: rightEffect,
     };
-    return this.publish();
+    return this.publishChanged();
   }
 
   async updateEffect(input: UpdateEffectInput): Promise<HaloSnapshot> {
     const target = assertSlot(this.snapshot, input.slot);
-    target.effect = {
+    const effect = {
       brightness: input.brightness,
       speedPercent: input.speedPercent,
       direction: input.direction,
       tailPercent: input.tailPercent,
     };
-    return this.publish();
+    if (sameEffect(target.effect, effect)) {
+      return this.currentSnapshot();
+    }
+    target.effect = effect;
+    return this.publishChanged();
   }
 
   async setGlobalBrightness(value: number): Promise<HaloSnapshot> {
+    if (this.snapshot.globalBrightness === value) {
+      return this.currentSnapshot();
+    }
     this.snapshot.globalBrightness = value;
-    return this.publish();
+    return this.publishChanged();
   }
 
-  private publish(): HaloSnapshot {
+  private publishChanged(): HaloSnapshot {
+    this.snapshot.revision += 1;
     const next = this.currentSnapshot();
     for (const listener of this.listeners) {
       listener(cloneSnapshot(next));
@@ -400,6 +414,26 @@ class DemoHaloBridge implements HaloBridge {
       empty = this.snapshot.slots.find((slot) => slot.taskKey === null);
     }
   }
+}
+
+function sameEffect(left: EffectProfile, right: EffectProfile): boolean {
+  return (
+    left.brightness === right.brightness &&
+    left.speedPercent === right.speedPercent &&
+    left.direction === right.direction &&
+    left.tailPercent === right.tailPercent
+  );
+}
+
+function sameSlotAssignment(left: RingSlot, right: RingSlot): boolean {
+  return (
+    left.taskKey === right.taskKey &&
+    left.status === right.status &&
+    left.source === right.source &&
+    left.confidence === right.confidence &&
+    left.bindingMode === right.bindingMode &&
+    left.locked === right.locked
+  );
 }
 
 function compareTaskKeys(left: TaskKey, right: TaskKey): number {

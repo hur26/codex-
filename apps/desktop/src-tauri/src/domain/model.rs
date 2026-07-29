@@ -148,6 +148,7 @@ pub struct RingSlot {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HaloSnapshot {
+    pub revision: u64,
     pub device_mode: DeviceMode,
     pub global_brightness: u8,
     pub slots: Vec<RingSlot>,

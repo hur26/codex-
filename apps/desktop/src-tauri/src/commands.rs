@@ -299,7 +299,9 @@ fn reset_virtual_device_inner(state: &AppState) -> Result<HaloSnapshot, CommandE
             engine
         }
     };
-    *engine = crate::domain::engine::HaloEngine::new(ROUND_COMPLETE_HOLD_MS);
+    let previous_revision = engine.snapshot().revision;
+    *engine =
+        crate::domain::engine::HaloEngine::reset_after(ROUND_COMPLETE_HOLD_MS, previous_revision);
     Ok(engine.snapshot())
 }
 
@@ -507,6 +509,7 @@ mod tests {
         assert_eq!(dimmed.global_brightness, 30);
 
         let reset = reset_virtual_device_inner(&state).unwrap();
+        assert_eq!(reset.revision, dimmed.revision + 1);
         assert_eq!(reset.device_mode, DeviceMode::Virtual);
         assert_eq!(reset.global_brightness, 100);
         assert!(reset.tasks.is_empty());

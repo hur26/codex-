@@ -628,7 +628,7 @@ function ringStyle(slot: RingSlot): CSSProperties {
 @keyframes halo-confirm {
   0% {
     filter: drop-shadow(0 0 0.2rem var(--ring-glow));
-    opacity: 0.35;
+    opacity: var(--ring-opacity-low);
   }
 
   42%,
@@ -646,14 +646,14 @@ function ringStyle(slot: RingSlot): CSSProperties {
 
   36%,
   100% {
-    opacity: 0.2;
+    opacity: var(--ring-opacity-low);
   }
 }
 
 @keyframes halo-unknown {
   0%,
   100% {
-    opacity: 0.26;
+    opacity: var(--ring-opacity-low);
   }
 
   50% {

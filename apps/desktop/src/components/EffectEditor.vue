@@ -34,6 +34,7 @@ const draft = reactive({
 });
 const activeField = ref<NumericField | null>(null);
 const validationError = ref<string | null>(null);
+const validationField = ref<NumericField | null>(null);
 
 const RULES: Record<
   NumericField,
@@ -71,6 +72,7 @@ function syncDraft() {
     draft.direction = effect.direction;
   }
   validationError.value = null;
+  validationField.value = null;
 }
 
 function parseField(field: NumericField): number | null {
@@ -84,6 +86,7 @@ function parseField(field: NumericField): number | null {
     value > rule.max
   ) {
     validationError.value = rule.message;
+    validationField.value = field;
     return null;
   }
   return value;
@@ -107,7 +110,10 @@ function currentProfile(): EffectProfile | null {
 
 function updateDraft(field: NumericField, event: Event) {
   draft[field] = (event.target as HTMLInputElement).value;
-  validationError.value = null;
+  if (validationField.value === field) {
+    validationError.value = null;
+    validationField.value = null;
+  }
 }
 
 function commit(field: NumericField) {
@@ -115,6 +121,7 @@ function commit(field: NumericField) {
     const value = parseField(field);
     if (value !== null) {
       validationError.value = null;
+      validationField.value = null;
       emit("set-global-brightness", value);
     }
     return;
@@ -131,6 +138,7 @@ function commitProfile() {
     return;
   }
   validationError.value = null;
+  validationField.value = null;
   emit("update-effect", {
     slot: props.selectedSlot.index,
     ...profile,
@@ -207,6 +215,8 @@ watch(
           step="1"
           :value="draft.global"
           aria-label="全局亮度"
+          :aria-invalid="validationField === 'global'"
+          aria-describedby="global-brightness-unit global-brightness-range-error"
           @focus="beginEditing('global')"
           @blur="finishEditing('global')"
           @input="updateDraft('global', $event)"
@@ -222,7 +232,8 @@ watch(
             max="100"
             step="1"
             :value="draft.global"
-            aria-describedby="global-brightness-unit"
+            :aria-invalid="validationField === 'global'"
+            aria-describedby="global-brightness-unit global-brightness-range-error"
             @focus="beginEditing('global')"
             @blur="finishEditing('global')"
             @input="updateDraft('global', $event)"
@@ -231,6 +242,9 @@ watch(
           <span id="global-brightness-unit">%</span>
         </label>
       </div>
+      <span id="global-brightness-range-error" class="sr-only">
+        全局亮度必须是 0–100 的整数
+      </span>
       <div class="scale" aria-hidden="true"><span>0</span><i /><span>100</span></div>
     </section>
 
@@ -266,6 +280,8 @@ watch(
               step="1"
               :value="draft.brightness"
               aria-label="单圈亮度"
+              :aria-invalid="validationField === 'brightness'"
+              aria-describedby="ring-brightness-unit ring-brightness-range-error"
               @focus="beginEditing('brightness')"
               @blur="finishEditing('brightness')"
               @input="updateDraft('brightness', $event)"
@@ -281,14 +297,19 @@ watch(
                 step="1"
                 :value="draft.brightness"
                 aria-label="单圈亮度数值"
+                :aria-invalid="validationField === 'brightness'"
+                aria-describedby="ring-brightness-unit ring-brightness-range-error"
                 @focus="beginEditing('brightness')"
                 @blur="finishEditing('brightness')"
                 @input="updateDraft('brightness', $event)"
                 @change="commit('brightness')"
               />
-              <span>%</span>
+              <span id="ring-brightness-unit">%</span>
             </span>
           </div>
+          <span id="ring-brightness-range-error" class="sr-only">
+            单圈亮度必须是 0–100 的整数
+          </span>
         </label>
 
         <label class="parameter-block">
@@ -301,6 +322,8 @@ watch(
               step="1"
               :value="draft.speed"
               aria-label="追逐速度"
+              :aria-invalid="validationField === 'speed'"
+              aria-describedby="ring-speed-unit ring-speed-range-error"
               @focus="beginEditing('speed')"
               @blur="finishEditing('speed')"
               @input="updateDraft('speed', $event)"
@@ -316,14 +339,19 @@ watch(
                 step="1"
                 :value="draft.speed"
                 aria-label="追逐速度数值"
+                :aria-invalid="validationField === 'speed'"
+                aria-describedby="ring-speed-unit ring-speed-range-error"
                 @focus="beginEditing('speed')"
                 @blur="finishEditing('speed')"
                 @input="updateDraft('speed', $event)"
                 @change="commit('speed')"
               />
-              <span>%</span>
+              <span id="ring-speed-unit">%</span>
             </span>
           </div>
+          <span id="ring-speed-range-error" class="sr-only">
+            追逐速度必须是 25–300 的整数
+          </span>
         </label>
 
         <div class="parameter-block">
@@ -358,6 +386,8 @@ watch(
               step="1"
               :value="draft.tail"
               aria-label="光尾长度"
+              :aria-invalid="validationField === 'tail'"
+              aria-describedby="ring-tail-unit ring-tail-range-error"
               @focus="beginEditing('tail')"
               @blur="finishEditing('tail')"
               @input="updateDraft('tail', $event)"
@@ -373,14 +403,19 @@ watch(
                 step="1"
                 :value="draft.tail"
                 aria-label="光尾长度数值"
+                :aria-invalid="validationField === 'tail'"
+                aria-describedby="ring-tail-unit ring-tail-range-error"
                 @focus="beginEditing('tail')"
                 @blur="finishEditing('tail')"
                 @input="updateDraft('tail', $event)"
                 @change="commit('tail')"
               />
-              <span>%</span>
+              <span id="ring-tail-unit">%</span>
             </span>
           </div>
+          <span id="ring-tail-range-error" class="sr-only">
+            光尾长度必须是 1–100 的整数
+          </span>
         </label>
       </fieldset>
     </section>

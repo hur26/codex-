@@ -11,6 +11,7 @@ const SLOT_COUNT: usize = 4;
 #[derive(Clone, Debug)]
 pub struct HaloEngine {
     round_complete_hold_ms: u64,
+    revision: u64,
     global_brightness: u8,
     tasks: HashMap<TaskKey, TaskRecord>,
     slots: Vec<RingSlot>,
@@ -51,11 +52,18 @@ impl HaloEngine {
 
         Self {
             round_complete_hold_ms,
+            revision: 0,
             global_brightness: 100,
             tasks: HashMap::new(),
             slots,
             queue: Vec::new(),
         }
+    }
+
+    pub(crate) fn reset_after(round_complete_hold_ms: u64, revision: u64) -> Self {
+        let mut engine = Self::new(round_complete_hold_ms);
+        engine.revision = revision.saturating_add(1);
+        engine
     }
 
     pub fn apply_signal(&mut self, signal: TaskSignal) {
@@ -86,6 +94,7 @@ impl HaloEngine {
             slot.source = Some(signal.state.source);
             slot.confidence = Some(signal.state.confidence);
             self.remove_from_queue(&task_key);
+            self.advance_revision();
             return;
         }
 
@@ -94,6 +103,7 @@ impl HaloEngine {
         } else {
             self.enqueue_recent(task_key);
         }
+        self.advance_revision();
     }
 
     pub fn manual_bind(
@@ -115,8 +125,13 @@ impl HaloEngine {
             .position(|candidate| candidate.task_key.as_ref() == Some(task));
 
         if current_slot == Some(slot) {
+            let changed = self.slots[slot].binding_mode != BindingMode::Manual
+                || self.slots[slot].locked != lock;
             self.bind_slot(slot, task.clone(), BindingMode::Manual, lock);
             self.remove_from_queue(task);
+            if changed {
+                self.advance_revision();
+            }
             return Ok(());
         }
 
@@ -132,6 +147,7 @@ impl HaloEngine {
         }
         self.fill_empty_slots_from_queue();
 
+        self.advance_revision();
         Ok(())
     }
 
@@ -142,6 +158,7 @@ impl HaloEngine {
         }
 
         self.slots[slot].locked = !self.slots[slot].locked;
+        self.advance_revision();
         Ok(())
     }
 
@@ -149,6 +166,7 @@ impl HaloEngine {
         self.validate_slot(left)?;
         self.validate_slot(right)?;
 
+        let before = self.slots.clone();
         let left_effect = self.slots[left].effect.clone();
         let right_effect = self.slots[right].effect.clone();
         self.slots.swap(left, right);
@@ -156,18 +174,29 @@ impl HaloEngine {
         self.slots[left].effect = left_effect;
         self.slots[right].index = right;
         self.slots[right].effect = right_effect;
+        if self.slots != before {
+            self.advance_revision();
+        }
         Ok(())
     }
 
     pub fn update_effect(&mut self, slot: usize, effect: EffectProfile) -> Result<(), EngineError> {
         self.validate_slot(slot)?;
+        if self.slots[slot].effect == effect {
+            return Ok(());
+        }
         self.slots[slot].effect = effect;
+        self.advance_revision();
         Ok(())
     }
 
     pub fn set_global_brightness(&mut self, value: u8) -> Result<(), EngineError> {
         validate_global_brightness(value).map_err(|error| EngineError::InvalidEffect { error })?;
+        if self.global_brightness == value {
+            return Ok(());
+        }
         self.global_brightness = value;
+        self.advance_revision();
         Ok(())
     }
 
@@ -191,10 +220,14 @@ impl HaloEngine {
             })
             .collect();
 
+        let changed = !releasable.is_empty();
         for slot in releasable {
             self.clear_slot(slot);
         }
         self.fill_empty_slots_from_queue();
+        if changed {
+            self.advance_revision();
+        }
     }
 
     pub fn snapshot(&self) -> HaloSnapshot {
@@ -218,6 +251,7 @@ impl HaloEngine {
             .collect();
 
         HaloSnapshot {
+            revision: self.revision,
             device_mode: DeviceMode::Virtual,
             global_brightness: self.global_brightness,
             slots: self.slots.clone(),
@@ -304,6 +338,10 @@ impl HaloEngine {
         } else {
             Err(EngineError::SlotOutOfBounds { slot })
         }
+    }
+
+    fn advance_revision(&mut self) {
+        self.revision = self.revision.saturating_add(1);
     }
 }
 
@@ -667,5 +705,82 @@ mod tests {
                 "taskKey": "0000000000000009"
             })
         );
+    }
+
+    #[test]
+    fn revision_is_monotonic_only_for_accepted_or_actual_state_changes() {
+        let mut engine = HaloEngine::new(300_000);
+        assert_eq!(engine.snapshot().revision, 0);
+        assert_eq!(engine.snapshot().revision, 0, "reads never mutate revision");
+
+        engine.apply_signal(signal(1, TaskStatus::Running, 100));
+        assert_eq!(engine.snapshot().revision, 1);
+        engine.apply_signal(signal(1, TaskStatus::Waiting, 99));
+        assert_eq!(engine.snapshot().revision, 1, "old signals are ignored");
+        engine.apply_signal(signal(1, TaskStatus::Waiting, 100));
+        assert_eq!(
+            engine.snapshot().revision,
+            2,
+            "an equal-timestamp accepted signal advances once"
+        );
+
+        engine
+            .set_global_brightness(100)
+            .expect("same valid brightness is a no-op");
+        engine
+            .update_effect(0, EffectProfile::default())
+            .expect("same valid profile is a no-op");
+        engine.swap_slots(0, 0).expect("same slot swap is a no-op");
+        assert_eq!(engine.snapshot().revision, 2);
+
+        engine
+            .manual_bind(&key(1), 0, false)
+            .expect("auto binding can become manual");
+        assert_eq!(engine.snapshot().revision, 3);
+        engine
+            .manual_bind(&key(1), 0, false)
+            .expect("identical manual binding is a no-op");
+        assert_eq!(engine.snapshot().revision, 3);
+
+        engine.toggle_lock(0).expect("lock changes state");
+        assert_eq!(engine.snapshot().revision, 4);
+        engine
+            .set_global_brightness(50)
+            .expect("brightness changes state");
+        assert_eq!(engine.snapshot().revision, 5);
+        engine
+            .update_effect(
+                0,
+                EffectProfile::new(50, 200, Direction::CounterClockwise, 50)
+                    .expect("test profile is valid"),
+            )
+            .expect("effect changes state");
+        assert_eq!(engine.snapshot().revision, 6);
+        engine.apply_signal(signal(2, TaskStatus::Running, 200));
+        assert_eq!(engine.snapshot().revision, 7);
+        engine.swap_slots(0, 1).expect("different assignments swap");
+        assert_eq!(engine.snapshot().revision, 8);
+
+        assert!(engine.set_global_brightness(101).is_err());
+        assert!(engine.toggle_lock(4).is_err());
+        assert_eq!(
+            engine.snapshot().revision,
+            8,
+            "failed changes never advance"
+        );
+    }
+
+    #[test]
+    fn tick_advances_revision_once_only_when_a_slot_is_released() {
+        let mut engine = HaloEngine::new(300_000);
+        engine.apply_signal(signal(1, TaskStatus::RoundCompleted, 1_000));
+        let accepted = engine.snapshot().revision;
+
+        engine.tick(300_999);
+        assert_eq!(engine.snapshot().revision, accepted);
+        engine.tick(301_000);
+        assert_eq!(engine.snapshot().revision, accepted + 1);
+        engine.tick(301_001);
+        assert_eq!(engine.snapshot().revision, accepted + 1);
     }
 }

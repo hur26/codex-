@@ -97,6 +97,7 @@ function slot(
 
 const selectedTask = task();
 const initialSnapshot: HaloSnapshot = {
+  revision: 1,
   deviceMode: "virtual",
   globalBrightness: 80,
   slots: [

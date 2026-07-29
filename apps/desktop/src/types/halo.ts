@@ -50,6 +50,7 @@ export interface RingSlot {
 }
 
 export interface HaloSnapshot {
+  revision: number;
   deviceMode: DeviceMode;
   globalBrightness: number;
   slots: RingSlot[];

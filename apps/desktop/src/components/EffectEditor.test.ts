@@ -87,6 +87,7 @@ function snapshot(
   effect: EffectProfile = DEFAULT_EFFECT,
 ): HaloSnapshot {
   return {
+    revision: 1,
     deviceMode: "virtual",
     globalBrightness,
     slots: Array.from({ length: 4 }, (_, index) =>
@@ -198,7 +199,12 @@ describe("EffectEditor", () => {
       max: "100",
       "aria-label": "全局亮度",
     });
-    expect(number.attributes("aria-describedby")).toBe("global-brightness-unit");
+    expect(number.attributes("aria-describedby")).toContain(
+      "global-brightness-unit",
+    );
+    expect(number.attributes("aria-describedby")).toContain(
+      "global-brightness-range-error",
+    );
 
     await number.setValue("64");
 
@@ -268,8 +274,26 @@ describe("EffectEditor", () => {
       });
       await wrapper.get(selector).setValue(value);
       expect(wrapper.get("[data-validation-error]").text()).toBe(error);
+      const field = wrapper.get(selector);
+      const range = field
+        .element.closest(".parameter-block, .editor-bank")
+        ?.querySelector('input[type="range"]');
+      expect(field.attributes("aria-invalid")).toBe("true");
+      expect(field.attributes("aria-describedby")).toMatch(/range-error/);
+      expect(range?.getAttribute("aria-invalid")).toBe("true");
+      expect(range?.getAttribute("aria-describedby")).toMatch(/range-error/);
       expect(wrapper.emitted("set-global-brightness")).toBeUndefined();
       expect(wrapper.emitted("update-effect")).toBeUndefined();
+
+      await field.setValue(
+        selector.includes("speed")
+          ? "25"
+          : selector.includes("tail")
+            ? "1"
+            : "0",
+      );
+      expect(field.attributes("aria-invalid")).toBe("false");
+      expect(wrapper.find("[data-validation-error]").exists()).toBe(false);
       wrapper.unmount();
     }
   });
@@ -370,18 +394,30 @@ describe("EffectEditor", () => {
     ).toContain("--ring-motion-duration: 720ms");
 
     const retained = mountedState.snapshot;
-    updateEffectMock.mockImplementationOnce(async () => {
-      mountedState.error = {
-        operation: "updateEffect",
-        code: "engineRejected",
-        message: "updateEffect 操作失败",
-      };
-      return null;
-    });
+    const failure = deferred<HaloSnapshot | null>();
+    updateEffectMock
+      .mockImplementationOnce(() =>
+        failure.promise.then((result) => {
+          mountedState.error = {
+            operation: "updateEffect",
+            code: "engineRejected",
+            message: "updateEffect 操作失败",
+          };
+          return result;
+        }),
+      )
+      .mockImplementationOnce(async (input: UpdateEffectInput) => {
+        mountedState.error = null;
+        mountedState.snapshot = replaceEffect(mountedState.snapshot!, input);
+        return mountedState.snapshot;
+      });
     await editor.get("[data-effect-speed-number]").setValue("260");
+    await editor.get("[data-effect-speed-number]").setValue("270");
+    failure.resolve(null);
     await flushPromises();
 
-    expect(mountedState.snapshot).toBe(retained);
+    expect(mountedState.snapshot).not.toBe(retained);
+    expect(mountedState.snapshot?.slots[0].effect.speedPercent).toBe(270);
     expect(wrapper.get("[data-app-error]").text()).toContain(
       "updateEffect 操作失败",
     );

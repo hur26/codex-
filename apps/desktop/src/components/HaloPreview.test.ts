@@ -297,6 +297,49 @@ describe("HaloPreview", () => {
     );
   });
 
+  it.each([
+    ["running", "hook", "observed"],
+    ["roundCompleted", "hook", "observed"],
+    ["failed", "simulator", "simulated"],
+    ["unknown", "hook", "observed"],
+  ] as const)(
+    "%s 在总亮度或圈亮度为零时不发光且动画不覆盖零值",
+    (status, source, confidence) => {
+      const globalOff = createSlot(0, status, source, confidence);
+      const localOff = createSlot(1, status, source, confidence);
+      localOff.effect.brightness = 0;
+      const wrapper = mount(HaloPreview, {
+        props: {
+          slots: [globalOff, localOff],
+          globalBrightness: 0,
+        },
+      });
+
+      expect(wrapper.get('[data-slot="0"]').attributes("style")).toContain(
+        "--ring-opacity: 0.000",
+      );
+      expect(wrapper.get('[data-slot="1"]').attributes("style")).toContain(
+        "--ring-opacity: 0.000",
+      );
+
+      const keyframeName =
+        status === "roundCompleted"
+          ? "halo-confirm"
+          : status === "failed"
+            ? "halo-fault"
+            : status === "unknown"
+              ? "halo-unknown"
+              : null;
+      if (keyframeName) {
+        const keyframes = componentSource.match(
+          new RegExp(`@keyframes ${keyframeName} \\{([\\s\\S]*?)\\n\\}`),
+        )?.[1];
+        expect(keyframes).toContain("var(--ring-opacity");
+        expect(keyframes).not.toMatch(/opacity:\s*0(?:\.\d+)?\s*;/);
+      }
+    },
+  );
+
   it("使用变量驱动的矢量光环，并在减少动态时停止动画但保留状态色", () => {
     expect(componentSource).toMatch(/(?:mask|conic-gradient)/);
     expect(componentSource).toContain("var(--halo-");

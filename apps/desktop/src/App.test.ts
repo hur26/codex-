@@ -98,6 +98,7 @@ const records = [
 ];
 
 const snapshot: HaloSnapshot = {
+  revision: 1,
   deviceMode: "virtual",
   globalBrightness: 86,
   slots: records.slice(0, 4).map((record, index) => slot(index, record)),
