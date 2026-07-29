@@ -1,3 +1,4 @@
+pub mod manager;
 pub mod presentation;
 pub mod protocol;
 pub mod simulator;

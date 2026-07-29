@@ -1,7 +1,7 @@
 use crate::device::presentation::{
     DeviceDirection, DeviceDisplayMode, DeviceRing, DeviceSnapshot, DeviceTaskStatus,
 };
-use crate::device::protocol::{self, Decoder, Frame, MessageType};
+use crate::device::protocol::{self, Decoder, Frame, MessageType, PROTOCOL_MAJOR};
 use crate::device::transport::{DeviceTransport, Endpoint, TransportError, TransportKind};
 use std::collections::VecDeque;
 
@@ -47,14 +47,34 @@ enum ResponseFault {
     CorruptCrc,
 }
 
-#[derive(Default)]
 pub struct SimulatedTransport {
     connected: bool,
     decoder: Decoder,
     responses: VecDeque<PendingResponse>,
     faults: VecDeque<Fault>,
+    protocol_major: u8,
     next_knob_sequence: u16,
     applied_snapshot: Option<DeviceSnapshot>,
+    state_write_log: Vec<(MessageType, u16)>,
+    heartbeat_count: usize,
+    max_pending_response_count: usize,
+}
+
+impl Default for SimulatedTransport {
+    fn default() -> Self {
+        Self {
+            connected: false,
+            decoder: Decoder::default(),
+            responses: VecDeque::new(),
+            faults: VecDeque::new(),
+            protocol_major: PROTOCOL_MAJOR,
+            next_knob_sequence: 0,
+            applied_snapshot: None,
+            state_write_log: Vec::new(),
+            heartbeat_count: 0,
+            max_pending_response_count: 0,
+        }
+    }
 }
 
 impl SimulatedTransport {
@@ -66,12 +86,47 @@ impl SimulatedTransport {
         self.faults.len()
     }
 
+    pub fn set_protocol_major(&mut self, protocol_major: u8) {
+        self.protocol_major = protocol_major;
+    }
+
+    pub fn full_snapshot_count(&self) -> usize {
+        self.state_write_log
+            .iter()
+            .filter(|(message_type, _)| *message_type == MessageType::FullSnapshot)
+            .count()
+    }
+
+    pub fn state_write_count(&self) -> usize {
+        self.state_write_log.len()
+    }
+
+    pub fn state_write_log(&self) -> &[(MessageType, u16)] {
+        &self.state_write_log
+    }
+
+    pub fn heartbeat_count(&self) -> usize {
+        self.heartbeat_count
+    }
+
+    pub fn max_pending_response_count(&self) -> usize {
+        self.max_pending_response_count
+    }
+
     pub fn inject_knob(&mut self, event: KnobEvent) -> Result<(), TransportError> {
+        let sequence = self.next_knob_sequence;
+        self.inject_knob_with_sequence(sequence, event)
+    }
+
+    pub fn inject_knob_with_sequence(
+        &mut self,
+        sequence: u16,
+        event: KnobEvent,
+    ) -> Result<(), TransportError> {
         if event == KnobEvent::Rotate(0) {
             return Err(TransportError::InvalidKnobDelta);
         }
-        let sequence = self.next_knob_sequence;
-        self.next_knob_sequence = self.next_knob_sequence.wrapping_add(1);
+        self.next_knob_sequence = sequence.wrapping_add(1);
         let payload = match event {
             KnobEvent::Rotate(delta) => vec![0x01, delta as u8],
             KnobEvent::ShortPress => vec![0x02, 0],
@@ -86,7 +141,18 @@ impl SimulatedTransport {
 
     fn process_frame(&mut self, frame: Frame) -> Result<(), TransportError> {
         if frame.message_type == MessageType::Heartbeat && frame.payload.is_empty() {
+            self.heartbeat_count += 1;
             return Ok(());
+        }
+        if matches!(
+            frame.message_type,
+            MessageType::FullSnapshot
+                | MessageType::RingUpdate
+                | MessageType::DisplayMode
+                | MessageType::Brightness
+        ) {
+            self.state_write_log
+                .push((frame.message_type, frame.sequence));
         }
         let response_fault = match self.faults.pop_front() {
             Some(Fault::NackOnce(reason)) => return self.queue_nack(&frame, reason, None),
@@ -198,8 +264,15 @@ impl SimulatedTransport {
         response: Frame,
         fault: Option<ResponseFault>,
     ) -> Result<(), TransportError> {
-        let bytes = protocol::encode(&response)?;
+        let mut bytes = protocol::encode(&response)?;
+        if self.protocol_major != PROTOCOL_MAJOR {
+            bytes[2] = self.protocol_major;
+            let crc_offset = bytes.len() - 2;
+            let crc = protocol::crc16_ccitt_false(&bytes[2..crc_offset]);
+            bytes[crc_offset..].copy_from_slice(&crc.to_le_bytes());
+        }
         self.responses.push_back(PendingResponse { bytes, fault });
+        self.max_pending_response_count = self.max_pending_response_count.max(self.responses.len());
         Ok(())
     }
 }
