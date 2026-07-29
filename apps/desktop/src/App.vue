@@ -40,6 +40,14 @@ const ADAPTER_LABELS: Record<AdapterState, string> = {
   degraded: "DEGRADED",
   offline: "OFFLINE",
 };
+const adapterDiagnosticTone = computed(() =>
+  store.state.adapterStatus.state === "online" ? "nominal" : "muted-blue",
+);
+const adapterDiagnosticLabel = computed(() => {
+  const status = store.state.adapterStatus;
+  const detail = status.message ? `，${status.message}` : "";
+  return `适配器诊断：${ADAPTER_LABELS[status.state]}，${status.mode.toUpperCase()}${detail}`;
+});
 
 const EMPTY_EFFECT: EffectProfile = {
   brightness: 80,
@@ -362,6 +370,8 @@ watch(
         class="adapter-state"
         :class="`adapter-${store.state.adapterStatus.state}`"
         :data-adapter-state="store.state.adapterStatus.state"
+        :data-diagnostic-tone="adapterDiagnosticTone"
+        :aria-label="adapterDiagnosticLabel"
         :title="store.state.adapterStatus.message ?? undefined"
       >
         <i aria-hidden="true" />

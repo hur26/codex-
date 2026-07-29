@@ -200,10 +200,7 @@ body {
   --adapter-color: var(--halo-round-completed);
 }
 
-.adapter-degraded {
-  --adapter-color: var(--halo-waiting);
-}
-
+.adapter-degraded,
 .adapter-offline {
   --adapter-color: var(--halo-unknown);
 }
