@@ -24,14 +24,6 @@ function bind(slot: number) {
   emit("bind", props.selectedTask.taskKey, slot);
 }
 
-function onBindKeydown(event: KeyboardEvent, slot: number) {
-  if (event.key !== "Enter" && event.key !== " ") {
-    return;
-  }
-  event.preventDefault();
-  bind(slot);
-}
-
 function toggleLock() {
   if (
     props.loading ||
@@ -71,7 +63,6 @@ function toggleLock() {
         :data-bind-slot="slot - 1"
         :disabled="loading || !selectedTask"
         @click="bind(slot - 1)"
-        @keydown="onBindKeydown($event, slot - 1)"
       >
         <span>R{{ String(slot).padStart(2, "0") }}</span>
         <small>绑定</small>

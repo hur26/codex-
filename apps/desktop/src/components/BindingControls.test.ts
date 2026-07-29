@@ -49,12 +49,19 @@ vi.mock("../stores/haloStore", () => ({
 
 import App from "../App.vue";
 import BindingControls from "./BindingControls.vue";
+import bindingControlsSource from "./BindingControls.vue?raw";
 import HaloPreview from "./HaloPreview.vue";
 import TaskRail from "./TaskRail.vue";
 
 enableAutoUnmount(afterEach);
 
 const PRIVATE_TASK_KEY = "f15a5c619d774ed1";
+let mountedState: {
+  snapshot: HaloSnapshot | null;
+  adapterStatus: AdapterStatus;
+  loading: boolean;
+  error: { operation: string; code: string; message: string } | null;
+};
 
 function task(taskKey = PRIVATE_TASK_KEY): TaskRecord {
   return {
@@ -103,7 +110,7 @@ const initialSnapshot: HaloSnapshot = {
 };
 
 describe("BindingControls", () => {
-  it("以匿名语义提供四个圈位按钮，并精确发出键盘绑定意图", async () => {
+  it("使用原生按钮完成键盘绑定，单次激活只发出一次意图", async () => {
     const wrapper = mount(BindingControls, {
       props: {
         selectedTask,
@@ -119,8 +126,11 @@ describe("BindingControls", () => {
     );
 
     await buttons[2].trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("bind")).toBeUndefined();
+    await buttons[2].trigger("click");
 
     expect(wrapper.emitted("bind")).toEqual([[PRIVATE_TASK_KEY, 2]]);
+    expect(bindingControlsSource).not.toContain("@keydown");
     expect(wrapper.html()).not.toContain(PRIVATE_TASK_KEY);
     expect(wrapper.html()).not.toContain("taskKey");
   });
@@ -189,8 +199,9 @@ describe("App binding orchestration", () => {
     manualBindMock.mockImplementation(() => Promise.resolve(fakeState.snapshot));
     swapSlotsMock.mockImplementation(() => Promise.resolve(fakeState.snapshot));
     toggleLockMock.mockImplementation(() => Promise.resolve(fakeState.snapshot));
+    mountedState = reactive(fakeState);
     createHaloStoreMock.mockReturnValue({
-      state: reactive(fakeState),
+      state: mountedState,
       load: loadMock,
       refreshAdapterStatus: refreshAdapterStatusMock,
       start: startMock,
@@ -242,14 +253,45 @@ describe("App binding orchestration", () => {
     const preview = wrapper.findComponent(HaloPreview);
 
     await preview.vm.$emit("drop", 3);
-    await preview.vm.$emit("dragstart", { kind: "slot", slot: 0 });
+    await preview.vm.$emit("dragstart", {
+      kind: "slot",
+      slot: 0,
+      taskKey: PRIVATE_TASK_KEY,
+    });
     await preview.vm.$emit("drop", 0);
-    await preview.vm.$emit("dragstart", { kind: "slot", slot: 0 });
+    await preview.vm.$emit("dragstart", {
+      kind: "slot",
+      slot: 0,
+      taskKey: PRIVATE_TASK_KEY,
+    });
     await preview.vm.$emit("drop", 3);
     await flushPromises();
 
     expect(swapSlotsMock).toHaveBeenCalledTimes(1);
     expect(swapSlotsMock).toHaveBeenCalledWith(0, 3);
+  });
+
+  it("拖拽途中实时快照替换源任务时拒绝陈旧的 slot 交换", async () => {
+    const wrapper = mount(App);
+    const preview = wrapper.findComponent(HaloPreview);
+
+    await preview.vm.$emit("dragstart", {
+      kind: "slot",
+      slot: 0,
+      taskKey: PRIVATE_TASK_KEY,
+    });
+    mountedState.snapshot = {
+      ...initialSnapshot,
+      slots: [
+        slot(0, "3333333333333333"),
+        ...initialSnapshot.slots.slice(1),
+      ],
+    };
+    await nextTick();
+    await preview.vm.$emit("drop", 3);
+    await flushPromises();
+
+    expect(swapSlotsMock).not.toHaveBeenCalled();
   });
 
   it("锁按钮连接 store.toggleLock 且命令参数精确", async () => {
@@ -276,7 +318,7 @@ describe("App binding orchestration", () => {
     const button = wrapper
       .findComponent(BindingControls)
       .get('[data-bind-slot="3"]');
-    await button.trigger("keydown", { key: "Enter" });
+    await button.trigger("click");
     await flushPromises();
 
     expect(manualBindMock).toHaveBeenCalledTimes(1);
@@ -287,10 +329,106 @@ describe("App binding orchestration", () => {
     });
   });
 
+  it("任务已在锁定目标圈时绑定为 no-op，不调用 manualBind 或解除锁定", async () => {
+    mountedState.snapshot = {
+      ...initialSnapshot,
+      slots: [
+        { ...initialSnapshot.slots[0], locked: true },
+        ...initialSnapshot.slots.slice(1),
+      ],
+    };
+    const lockedSnapshot = fakeState.snapshot;
+    const wrapper = mount(App);
+    const rail = wrapper.findComponent(TaskRail);
+
+    await rail.vm.$emit("select-task", PRIVATE_TASK_KEY);
+    await nextTick();
+    await wrapper
+      .findComponent(BindingControls)
+      .get('[data-bind-slot="0"]')
+      .trigger("click");
+    await flushPromises();
+
+    expect(manualBindMock).not.toHaveBeenCalled();
+    expect(fakeState.snapshot).toBe(lockedSnapshot);
+    expect(fakeState.snapshot?.slots[0].locked).toBe(true);
+  });
+
+  it("dragend、Escape、窗口失焦和源节点移除都会取消活动拖拽", async () => {
+    const wrapper = mount(App);
+    const rail = wrapper.findComponent(TaskRail);
+    const preview = wrapper.findComponent(HaloPreview);
+
+    for (const cancel of [
+      async () => rail.vm.$emit("dragend"),
+      async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })),
+      async () => window.dispatchEvent(new Event("blur")),
+    ]) {
+      await rail.vm.$emit("dragstart", {
+        kind: "task",
+        taskKey: PRIVATE_TASK_KEY,
+      });
+      await nextTick();
+      expect(preview.props("dragActive")).toBe(true);
+      await cancel();
+      await nextTick();
+      expect(preview.props("dragActive")).toBe(false);
+      await preview.vm.$emit("drop", 3);
+    }
+
+    await rail.vm.$emit("dragstart", {
+      kind: "task",
+      taskKey: PRIVATE_TASK_KEY,
+    });
+    mountedState.snapshot = {
+      ...initialSnapshot,
+      slots: initialSnapshot.slots.map((candidate) =>
+        candidate.taskKey === PRIVATE_TASK_KEY
+          ? slot(candidate.index, null)
+          : candidate,
+      ),
+      tasks: initialSnapshot.tasks.filter(
+        (candidate) => candidate.taskKey !== PRIVATE_TASK_KEY,
+      ),
+    };
+    await nextTick();
+    expect(preview.props("dragActive")).toBe(false);
+    await preview.vm.$emit("drop", 3);
+    await flushPromises();
+
+    expect(manualBindMock).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("卸载时移除全局取消监听，避免拖拽状态跨页面残留", async () => {
+    const addSpy = vi.spyOn(window, "addEventListener");
+    const removeSpy = vi.spyOn(window, "removeEventListener");
+    const wrapper = mount(App);
+    const rail = wrapper.findComponent(TaskRail);
+
+    await rail.vm.$emit("dragstart", {
+      kind: "task",
+      taskKey: PRIVATE_TASK_KEY,
+    });
+    await nextTick();
+
+    const blurHandler = addSpy.mock.calls.find(([type]) => type === "blur")?.[1];
+    const keyHandler = addSpy.mock.calls.find(([type]) => type === "keydown")?.[1];
+    expect(blurHandler).toBeTypeOf("function");
+    expect(keyHandler).toBeTypeOf("function");
+
+    wrapper.unmount();
+
+    expect(removeSpy).toHaveBeenCalledWith("blur", blurHandler);
+    expect(removeSpy).toHaveBeenCalledWith("keydown", keyHandler);
+    addSpy.mockRestore();
+    removeSpy.mockRestore();
+  });
+
   it("操作失败保留旧快照并由 App 的 alert 显示错误", async () => {
-    const oldSnapshot = fakeState.snapshot;
+    const oldSnapshot = mountedState.snapshot;
     manualBindMock.mockImplementation(async () => {
-      fakeState.error = {
+      mountedState.error = {
         operation: "manualBind",
         code: "engineRejected",
         message: "manualBind 操作失败",
@@ -308,7 +446,7 @@ describe("App binding orchestration", () => {
     await preview.vm.$emit("drop", 2);
     await flushPromises();
 
-    expect(fakeState.snapshot).toBe(oldSnapshot);
+    expect(mountedState.snapshot).toBe(oldSnapshot);
     expect(wrapper.get("[data-app-error]").attributes("role")).toBe("alert");
     expect(wrapper.get("[data-app-error]").text()).toContain(
       "manualBind 操作失败",

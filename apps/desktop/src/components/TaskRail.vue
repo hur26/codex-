@@ -27,6 +27,7 @@ const emit = defineEmits<{
   select: [slot: number];
   "select-task": [taskKey: string];
   dragstart: [drag: ActiveDrag];
+  dragend: [];
 }>();
 
 const railExpanded = ref(false);
@@ -132,6 +133,10 @@ function startTaskDrag(event: DragEvent, taskKey: string) {
   }
   emit("dragstart", { kind: "task", taskKey });
 }
+
+function finishTaskDrag() {
+  emit("dragend");
+}
 </script>
 
 <template>
@@ -177,6 +182,7 @@ function startTaskDrag(event: DragEvent, taskKey: string) {
             @dragstart="
               slot.taskKey && startTaskDrag($event, slot.taskKey)
             "
+            @dragend="finishTaskDrag"
           >
             <span class="row-index">{{ String(slot.index + 1).padStart(2, "0") }}</span>
             <span class="row-core">
@@ -223,6 +229,7 @@ function startTaskDrag(event: DragEvent, taskKey: string) {
               aria-label="选择等待队列中的匿名任务"
               @click="selectQueuedTask(queuedTask.taskKey)"
               @dragstart="startTaskDrag($event, queuedTask.taskKey)"
+              @dragend="finishTaskDrag"
             >
               <strong>QUEUE {{ String(index + 1).padStart(2, "0") }}</strong>
               <small>

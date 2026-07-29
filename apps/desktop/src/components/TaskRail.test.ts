@@ -1,7 +1,7 @@
 import { mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { RingSlot, TaskRecord, TaskStatus } from "../types/halo";
 import TaskRail from "./TaskRail.vue";
 import componentSource from "./TaskRail.vue?raw";
@@ -158,6 +158,35 @@ describe("TaskRail", () => {
     ).toBe("false");
     expect(wrapper.find("[data-bind-control]").exists()).toBe(false);
     expect(wrapper.find("[data-lock-control]").exists()).toBe(false);
+  });
+
+  it("任务拖拽写入与 active kind 一致的安全 marker 并显式发出 dragend", async () => {
+    const wrapper = mount(TaskRail, {
+      props: {
+        slots,
+        tasks: [running, waiting, completed],
+        queue: [],
+        nowMs,
+        selectedSlot: null,
+      },
+    });
+    const row = wrapper.get('[data-task-slot="0"]');
+    const dataTransfer = {
+      effectAllowed: "none",
+      setData: vi.fn(),
+    };
+
+    await row.trigger("dragstart", { dataTransfer });
+    await row.trigger("dragend", { dataTransfer });
+
+    expect(wrapper.emitted("dragstart")).toEqual([
+      [{ kind: "task", taskKey: PRIVATE_KEYS.running }],
+    ]);
+    expect(wrapper.emitted("dragend")).toEqual([[]]);
+    expect(dataTransfer.setData).toHaveBeenCalledWith(
+      "application/x-codex-halo-drag",
+      "task",
+    );
   });
 
   it("提供可访问的抽屉开关并让折叠内容持续存在于 DOM", async () => {

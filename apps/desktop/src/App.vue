@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import ActivityStrip from "./components/ActivityStrip.vue";
 import BindingControls from "./components/BindingControls.vue";
 import CentralDisplay from "./components/CentralDisplay.vue";
@@ -85,11 +85,30 @@ function selectTask(taskKey: string) {
 }
 
 function beginDrag(drag: ActiveDrag) {
+  if (
+    (drag.kind === "task" &&
+      !tasks.value.some((task) => task.taskKey === drag.taskKey)) ||
+    (drag.kind === "slot" &&
+      !slots.value.some(
+        (slot) =>
+          slot.index === drag.slot &&
+          slot.taskKey !== null &&
+          slot.taskKey === drag.taskKey,
+      ))
+  ) {
+    return;
+  }
   activeDrag.value = drag;
 }
 
 function clearActiveDrag() {
   activeDrag.value = null;
+}
+
+function handleGlobalKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    clearActiveDrag();
+  }
 }
 
 async function manualBind(taskKey: string, slot: number) {
@@ -98,6 +117,14 @@ async function manualBind(taskKey: string, slot: number) {
     slot < 0 ||
     slot > 3 ||
     !tasks.value.some((task) => task.taskKey === taskKey)
+  ) {
+    return;
+  }
+  if (
+    slots.value.some(
+      (candidate) =>
+        candidate.index === slot && candidate.taskKey === taskKey,
+    )
   ) {
     return;
   }
@@ -139,6 +166,10 @@ async function dropOnSlot(slot: number) {
   if (drag.slot === slot) {
     return;
   }
+  const source = slots.value.find((candidate) => candidate.index === drag.slot);
+  if (!source?.taskKey || source.taskKey !== drag.taskKey) {
+    return;
+  }
 
   bindingCommandPending.value = true;
   try {
@@ -163,15 +194,42 @@ onMounted(() => {
   void store.load();
   void store.refreshAdapterStatus();
   void store.start();
+  window.addEventListener("blur", clearActiveDrag);
+  window.addEventListener("keydown", handleGlobalKeydown);
 });
 
 onUnmounted(() => {
+  clearActiveDrag();
+  window.removeEventListener("blur", clearActiveDrag);
+  window.removeEventListener("keydown", handleGlobalKeydown);
   if (activityClock !== null) {
     window.clearInterval(activityClock);
     activityClock = null;
   }
   void store.stop();
 });
+
+watch(
+  () => store.state.snapshot,
+  () => {
+    const drag = activeDrag.value;
+    if (!drag) {
+      return;
+    }
+    if (
+      (drag.kind === "task" &&
+        !tasks.value.some((task) => task.taskKey === drag.taskKey)) ||
+      (drag.kind === "slot" &&
+        !slots.value.some(
+          (slot) =>
+            slot.index === drag.slot && slot.taskKey === drag.taskKey,
+        ))
+    ) {
+      clearActiveDrag();
+    }
+  },
+  { flush: "sync" },
+);
 </script>
 
 <template>
@@ -266,6 +324,8 @@ onUnmounted(() => {
           <HaloPreview
             :slots="slots"
             :selected-slot="selectedSlot"
+            :drag-active="activeDrag !== null"
+            :drag-kind="activeDrag?.kind ?? null"
             @select="selectSlot"
             @dragstart="beginDrag"
             @drop="dropOnSlot"

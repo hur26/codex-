@@ -163,6 +163,7 @@ describe("HaloPreview", () => {
       props: {
         slots: [occupied, createSlot(1)],
         selectedSlot: null,
+        dragActive: true,
       },
     });
     const dataTransfer = {
@@ -177,7 +178,7 @@ describe("HaloPreview", () => {
     });
 
     expect(wrapper.emitted("dragstart")).toEqual([
-      [{ kind: "slot", slot: 0 }],
+      [{ kind: "slot", slot: 0, taskKey: occupied.taskKey }],
     ]);
     expect(dataTransfer.setData).toHaveBeenCalledWith(
       "application/x-codex-halo-drag",
@@ -197,10 +198,15 @@ describe("HaloPreview", () => {
       props: {
         slots: [createSlot(0), createSlot(1)],
         selectedSlot: null,
+        dragActive: true,
+        dragKind: "task",
       },
     });
     const ring = wrapper.get('[data-slot="1"]');
-    const dataTransfer = { dropEffect: "none" };
+    const dataTransfer = {
+      dropEffect: "none",
+      getData: vi.fn(() => "task"),
+    };
 
     await ring.trigger("dragenter", { dataTransfer });
     expect(ring.attributes("data-drop-active")).toBe("true");
@@ -210,6 +216,64 @@ describe("HaloPreview", () => {
     await ring.trigger("drop", { dataTransfer });
     expect(wrapper.emitted("drop")).toEqual([[1]]);
     expect(ring.attributes("data-drop-active")).toBe("false");
+  });
+
+  it("外部或 marker 非法的拖拽不显示放置反馈也不发出 drop", async () => {
+    const wrapper = mount(HaloPreview, {
+      props: {
+        slots: [createSlot(0)],
+        selectedSlot: null,
+        dragActive: true,
+        dragKind: "task",
+      },
+    });
+    const ring = wrapper.get('[data-slot="0"]');
+    const dataTransfer = {
+      dropEffect: "none",
+      getData: vi.fn(() => "external-file"),
+    };
+
+    await ring.trigger("dragenter", { dataTransfer });
+    expect(ring.attributes("data-drop-active")).toBe("false");
+    expect(ring.attributes("aria-label")).not.toContain("释放以完成绑定");
+    expect(dataTransfer.dropEffect).toBe("none");
+
+    await ring.trigger("drop", { dataTransfer });
+    expect(wrapper.emitted("drop")).toBeUndefined();
+  });
+
+  it("dragend 与父级取消信号都会清理放置反馈和 aria 提示", async () => {
+    const occupied = createSlot(0, "running", "hook", "observed");
+    const wrapper = mount(HaloPreview, {
+      props: {
+        slots: [occupied, createSlot(1)],
+        selectedSlot: null,
+        dragActive: true,
+        dragKind: "slot",
+      },
+    });
+    const source = wrapper.get('[data-slot="0"]');
+    const target = wrapper.get('[data-slot="1"]');
+    const dataTransfer = {
+      effectAllowed: "none",
+      dropEffect: "none",
+      setData: vi.fn(),
+      getData: vi.fn(() => "slot"),
+    };
+
+    await source.trigger("dragstart", { dataTransfer });
+    await target.trigger("dragenter", { dataTransfer });
+    expect(target.attributes("data-drop-active")).toBe("true");
+
+    await source.trigger("dragend", { dataTransfer });
+    expect(wrapper.emitted("dragend")).toEqual([[]]);
+    expect(target.attributes("data-drop-active")).toBe("false");
+
+    await target.trigger("dragenter", { dataTransfer });
+    expect(target.attributes("data-drop-active")).toBe("true");
+    await wrapper.setProps({ dragActive: false });
+    expect(target.attributes("data-drop-active")).toBe("false");
+    expect(target.attributes("aria-label")).not.toContain("释放以完成绑定");
   });
 
   it("按 25% 到 300% 的完整灯效速度范围换算追逐周期", () => {

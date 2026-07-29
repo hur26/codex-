@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, type CSSProperties } from "vue";
+import { computed, ref, watch, type CSSProperties } from "vue";
 import type {
   ActiveDrag,
   Confidence,
@@ -13,19 +13,25 @@ const props = withDefaults(
   defineProps<{
     slots: RingSlot[];
     selectedSlot?: number | null;
+    dragActive?: boolean;
+    dragKind?: ActiveDrag["kind"] | null;
   }>(),
   {
     selectedSlot: null,
+    dragActive: false,
+    dragKind: null,
   },
 );
 
 const emit = defineEmits<{
   select: [slot: number];
   dragstart: [drag: ActiveDrag];
+  dragend: [];
   drop: [slot: number];
 }>();
 
 const dropTarget = ref<number | null>(null);
+const DRAG_MIME = "application/x-codex-halo-drag";
 const EMPTY_EFFECT: EffectProfile = {
   brightness: 80,
   speedPercent: 100,
@@ -126,12 +132,38 @@ function startSlotDrag(event: DragEvent, slot: RingSlot) {
   }
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("application/x-codex-halo-drag", "slot");
+    event.dataTransfer.setData(DRAG_MIME, "slot");
   }
-  emit("dragstart", { kind: "slot", slot: slot.index });
+  emit("dragstart", {
+    kind: "slot",
+    slot: slot.index,
+    taskKey: slot.taskKey,
+  });
+}
+
+function hasLegalMarker(event: DragEvent, allowProtected = true) {
+  if (!props.dragActive || !props.dragKind || !event.dataTransfer) {
+    return false;
+  }
+
+  let marker = "";
+  try {
+    marker = event.dataTransfer.getData(DRAG_MIME);
+  } catch {
+    return false;
+  }
+  if (marker) {
+    return marker === props.dragKind;
+  }
+
+  const types = Array.from(event.dataTransfer.types ?? []);
+  return allowProtected && types.includes(DRAG_MIME);
 }
 
 function enterDropTarget(event: DragEvent, slot: number) {
+  if (!hasLegalMarker(event)) {
+    return;
+  }
   event.preventDefault();
   if (event.dataTransfer) {
     event.dataTransfer.dropEffect = "move";
@@ -155,10 +187,28 @@ function leaveDropTarget(event: DragEvent, slot: number) {
 }
 
 function dropOnSlot(event: DragEvent, slot: number) {
+  if (!hasLegalMarker(event, false)) {
+    dropTarget.value = null;
+    return;
+  }
   event.preventDefault();
   dropTarget.value = null;
   emit("drop", slot);
 }
+
+function finishSlotDrag() {
+  dropTarget.value = null;
+  emit("dragend");
+}
+
+watch(
+  () => props.dragActive,
+  (active) => {
+    if (!active) {
+      dropTarget.value = null;
+    }
+  },
+);
 
 function ringStyle(slot: RingSlot): CSSProperties {
   const speed = Math.max(25, Math.min(300, slot.effect.speedPercent));
@@ -205,6 +255,7 @@ function ringStyle(slot: RingSlot): CSSProperties {
       :aria-pressed="selectedSlot === slot.index"
       @click="emit('select', slot.index)"
       @dragstart="startSlotDrag($event, slot)"
+      @dragend="finishSlotDrag"
       @dragenter="enterDropTarget($event, slot.index)"
       @dragover="enterDropTarget($event, slot.index)"
       @dragleave="leaveDropTarget($event, slot.index)"
