@@ -21,6 +21,7 @@ export type SignalKind =
 export type BindingMode = "auto" | "manual";
 export type DeviceMode = "virtual";
 export type Direction = "clockwise" | "counterClockwise";
+export type DisplayMode = "ambient" | "overview" | "detail";
 
 export interface EffectProfile {
   brightness: number;
