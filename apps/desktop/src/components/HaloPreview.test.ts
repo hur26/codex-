@@ -157,6 +157,27 @@ describe("HaloPreview", () => {
     expect(wrapper.emitted("select")).toEqual([[2]]);
   });
 
+  it("按 25% 到 300% 的完整灯效速度范围换算追逐周期", () => {
+    const fastest = createSlot(0, "running", "hook", "observed");
+    fastest.effect.speedPercent = 300;
+    const slowest = createSlot(1, "running", "hook", "observed");
+    slowest.effect.speedPercent = 25;
+
+    const wrapper = mount(HaloPreview, {
+      props: {
+        slots: [fastest, slowest],
+        selectedSlot: null,
+      },
+    });
+
+    expect(wrapper.get('[data-slot="0"]').attributes("style")).toContain(
+      "--ring-motion-duration: 600ms",
+    );
+    expect(wrapper.get('[data-slot="1"]').attributes("style")).toContain(
+      "--ring-motion-duration: 7200ms",
+    );
+  });
+
   it("使用变量驱动的矢量光环，并在减少动态时停止动画但保留状态色", () => {
     expect(componentSource).toMatch(/(?:mask|conic-gradient)/);
     expect(componentSource).toContain("var(--halo-");

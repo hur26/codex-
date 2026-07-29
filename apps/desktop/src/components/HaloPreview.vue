@@ -115,7 +115,7 @@ function ringLabel(slot: RingSlot) {
 }
 
 function ringStyle(slot: RingSlot): CSSProperties {
-  const speed = Math.max(25, Math.min(250, slot.effect.speedPercent));
+  const speed = Math.max(25, Math.min(300, slot.effect.speedPercent));
   const duration = MOTION_BASE_MS[visualStatus(slot)];
   const opacity = 0.24 + Math.max(0, Math.min(100, slot.effect.brightness)) * 0.0076;
   const tail = Math.max(1, Math.min(100, slot.effect.tailPercent));
