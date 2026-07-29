@@ -1,5 +1,6 @@
 pub mod app_state;
 pub mod commands;
+pub mod device;
 pub mod domain;
 pub mod probe_adapter;
 
