@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import type { DisplayMode } from "../types/halo";
 
 const props = withDefaults(
@@ -20,10 +20,21 @@ const emit = defineEmits<{
 }>();
 
 const MODE_SEQUENCE: DisplayMode[] = ["ambient", "overview", "detail"];
+const MODE_LABELS: Record<DisplayMode, string> = {
+  ambient: "环境模式",
+  overview: "总览模式",
+  detail: "详情模式",
+};
 
 let holdTimer: ReturnType<typeof setTimeout> | null = null;
 const pressActive = ref(false);
 let longPressTriggered = false;
+let activePointerId: number | null = null;
+
+const crownLabel = computed(
+  () =>
+    `表冠，当前${MODE_LABELS[props.mode]}。短按切换模式，长按返回环境模式`,
+);
 
 function clearHoldTimer() {
   if (holdTimer !== null) {
@@ -61,6 +72,7 @@ function finishPress() {
   }
 
   pressActive.value = false;
+  activePointerId = null;
   clearHoldTimer();
 
   if (!longPressTriggered) {
@@ -73,7 +85,33 @@ function finishPress() {
 function cancelPress() {
   pressActive.value = false;
   longPressTriggered = false;
+  activePointerId = null;
   clearHoldTimer();
+}
+
+function beginPointerPress(event: PointerEvent) {
+  if (event.button !== 0 || !event.isPrimary || pressActive.value) {
+    return;
+  }
+
+  activePointerId = event.pointerId;
+  beginPress();
+}
+
+function finishPointerPress(event: PointerEvent) {
+  if (activePointerId === null || event.pointerId !== activePointerId) {
+    return;
+  }
+
+  finishPress();
+}
+
+function cancelPointerPress(event: PointerEvent) {
+  if (activePointerId === null || event.pointerId !== activePointerId) {
+    return;
+  }
+
+  cancelPress();
 }
 
 function rotate(direction: -1 | 1) {
@@ -91,11 +129,12 @@ function isActivationKey(event: KeyboardEvent) {
 }
 
 function handleKeyDown(event: KeyboardEvent) {
-  if (!isActivationKey(event) || event.repeat) {
+  if (!isActivationKey(event) || event.repeat || pressActive.value) {
     return;
   }
 
   event.preventDefault();
+  activePointerId = null;
   beginPress();
 }
 
@@ -114,7 +153,14 @@ function handleKeyCancel(event: KeyboardEvent) {
   }
 }
 
-onUnmounted(cancelPress);
+onMounted(() => {
+  window.addEventListener("blur", cancelPress);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("blur", cancelPress);
+  cancelPress();
+});
 </script>
 
 <template>
@@ -136,14 +182,16 @@ onUnmounted(cancelPress);
 
     <button
       class="crown-button"
+      :class="{ pressed: pressActive }"
       data-crown-press
+      :data-pressed="pressActive"
       type="button"
-      aria-label="表冠：短按切换屏幕模式，长按返回环境模式"
-      :aria-pressed="pressActive"
-      @pointerdown="beginPress"
-      @pointerup="finishPress"
-      @pointercancel="cancelPress"
-      @pointerleave="cancelPress"
+      :aria-label="crownLabel"
+      @pointerdown="beginPointerPress"
+      @pointerup="finishPointerPress"
+      @pointercancel="cancelPointerPress"
+      @pointerleave="cancelPointerPress"
+      @blur="cancelPress"
       @keydown="handleKeyDown"
       @keyup="handleKeyUp"
       @keydown.esc="handleKeyCancel"
@@ -177,7 +225,7 @@ onUnmounted(cancelPress);
   right: 3.2%;
   bottom: 9%;
   display: grid;
-  grid-template-columns: 1.2rem clamp(2.8rem, 8vw, 4rem) 1.2rem;
+  grid-template-columns: 1.5rem clamp(2.8rem, 8vw, 4rem) 1.5rem;
   align-items: center;
   transform: rotate(-35deg);
 }
@@ -244,7 +292,7 @@ onUnmounted(cancelPress);
 }
 
 .crown-button:active .crown-cap,
-.crown-button[aria-pressed="true"] .crown-cap {
+.crown-button.pressed .crown-cap {
   transform: scale(0.94);
 }
 
@@ -288,7 +336,7 @@ onUnmounted(cancelPress);
 .rotation-control {
   z-index: 2;
   display: grid;
-  width: 1.3rem;
+  width: 1.5rem;
   aspect-ratio: 1;
   padding: 0;
   place-items: center;
@@ -327,7 +375,29 @@ onUnmounted(cancelPress);
   .crown-control {
     right: 0;
     bottom: 6%;
-    grid-template-columns: 1rem 2.8rem 1rem;
+    grid-template-columns: 1.5rem 2.8rem 1.5rem;
+  }
+}
+
+@media (forced-colors: active) {
+  .crown-button,
+  .rotation-control {
+    border-color: ButtonText;
+    color: ButtonText;
+    background: Canvas;
+    outline: 1px solid ButtonText;
+    outline-offset: 2px;
+  }
+
+  .crown-button:focus-visible,
+  .rotation-control:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 3px;
+  }
+
+  .crown-cap i {
+    background: ButtonText;
+    box-shadow: none;
   }
 }
 

@@ -1,4 +1,5 @@
-import { mount } from "@vue/test-utils";
+import { enableAutoUnmount, mount } from "@vue/test-utils";
+import { nextTick } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import CrownControl from "./CrownControl.vue";
 import componentSource from "./CrownControl.vue?raw";
@@ -6,6 +7,7 @@ import componentSource from "./CrownControl.vue?raw";
 afterEach(() => {
   vi.useRealTimers();
 });
+enableAutoUnmount(afterEach);
 
 function mountCrown(
   mode: "ambient" | "overview" | "detail" = "ambient",
@@ -20,6 +22,27 @@ function mountCrown(
   });
 }
 
+const primaryPointer = {
+  button: 0,
+  isPrimary: true,
+  pointerId: 11,
+};
+
+async function dispatchPointer(
+  element: Element,
+  type: "pointerdown" | "pointerup" | "pointercancel" | "pointerleave",
+  init = primaryPointer,
+) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    button: { value: init.button },
+    isPrimary: { value: init.isPrimary },
+    pointerId: { value: init.pointerId },
+  });
+  element.dispatchEvent(event);
+  await nextTick();
+}
+
 describe("CrownControl", () => {
   it.each([
     ["ambient", "overview"],
@@ -30,9 +53,9 @@ describe("CrownControl", () => {
     const wrapper = mountCrown(mode, null);
     const crown = wrapper.get("[data-crown-press]");
 
-    await crown.trigger("pointerdown");
+    await dispatchPointer(crown.element, "pointerdown");
     vi.advanceTimersByTime(200);
-    await crown.trigger("pointerup");
+    await dispatchPointer(crown.element, "pointerup");
 
     expect(wrapper.emitted("update:mode")).toEqual([[nextMode]]);
   });
@@ -42,8 +65,8 @@ describe("CrownControl", () => {
     const wrapper = mountCrown("detail", null);
     const crown = wrapper.get("[data-crown-press]");
 
-    await crown.trigger("pointerdown");
-    await crown.trigger("pointerup");
+    await dispatchPointer(crown.element, "pointerdown");
+    await dispatchPointer(crown.element, "pointerup");
 
     expect(wrapper.emitted("update:mode")).toEqual([["ambient"]]);
   });
@@ -67,9 +90,9 @@ describe("CrownControl", () => {
     const wrapper = mountCrown("overview", 2);
     const crown = wrapper.get("[data-crown-press]");
 
-    await crown.trigger("pointerdown");
+    await dispatchPointer(crown.element, "pointerdown");
     vi.advanceTimersByTime(500);
-    await crown.trigger("pointerup");
+    await dispatchPointer(crown.element, "pointerup");
 
     expect(wrapper.emitted("update:mode")).toEqual([["ambient"]]);
   });
@@ -79,11 +102,11 @@ describe("CrownControl", () => {
     const wrapper = mountCrown("ambient", 0);
     const crown = wrapper.get("[data-crown-press]");
 
-    expect(crown.attributes("aria-pressed")).toBe("false");
-    await crown.trigger("pointerdown");
-    expect(crown.attributes("aria-pressed")).toBe("true");
-    await crown.trigger("pointerup");
-    expect(crown.attributes("aria-pressed")).toBe("false");
+    expect(crown.attributes("data-pressed")).toBe("false");
+    await dispatchPointer(crown.element, "pointerdown");
+    expect(crown.attributes("data-pressed")).toBe("true");
+    await dispatchPointer(crown.element, "pointerup");
+    expect(crown.attributes("data-pressed")).toBe("false");
   });
 
   it("取消或离开表冠时清理长按计时且不触发短按", async () => {
@@ -92,8 +115,11 @@ describe("CrownControl", () => {
     for (const cancelEvent of ["pointercancel", "pointerleave"]) {
       const wrapper = mountCrown("overview", 2);
       const crown = wrapper.get("[data-crown-press]");
-      await crown.trigger("pointerdown");
-      await crown.trigger(cancelEvent);
+      await dispatchPointer(crown.element, "pointerdown");
+      await dispatchPointer(
+        crown.element,
+        cancelEvent as "pointercancel" | "pointerleave",
+      );
       vi.advanceTimersByTime(1000);
 
       expect(wrapper.emitted("update:mode")).toBeUndefined();
@@ -113,11 +139,87 @@ describe("CrownControl", () => {
     expect(wrapper.emitted("update:mode")).toEqual([["overview"]]);
   });
 
+  it.each(["blur", "window blur"] as const)(
+    "%s 会取消待定长按并清除按压状态",
+    async (blurKind) => {
+      vi.useFakeTimers();
+      const wrapper = mountCrown("overview", 2);
+      const crown = wrapper.get("[data-crown-press]");
+
+      await dispatchPointer(crown.element, "pointerdown");
+      expect(crown.attributes("data-pressed")).toBe("true");
+
+      if (blurKind === "blur") {
+        await crown.trigger("blur");
+      } else {
+        window.dispatchEvent(new Event("blur"));
+      }
+      await wrapper.vm.$nextTick();
+      vi.advanceTimersByTime(1000);
+
+      expect(wrapper.emitted("update:mode")).toBeUndefined();
+      expect(crown.attributes("data-pressed")).toBe("false");
+    },
+  );
+
+  it("忽略右键与非主指针，不启动长按", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountCrown("overview", 2);
+    const crown = wrapper.get("[data-crown-press]");
+
+    await dispatchPointer(crown.element, "pointerdown", {
+      button: 2,
+      isPrimary: true,
+      pointerId: 12,
+    });
+    await dispatchPointer(crown.element, "pointerdown", {
+      button: 0,
+      isPrimary: false,
+      pointerId: 13,
+    });
+    vi.advanceTimersByTime(1000);
+
+    expect(wrapper.emitted("update:mode")).toBeUndefined();
+    expect(crown.attributes("data-pressed")).toBe("false");
+  });
+
+  it("只允许启动按压的 pointerId 完成或取消交互", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountCrown("overview", 2);
+    const crown = wrapper.get("[data-crown-press]");
+
+    await dispatchPointer(crown.element, "pointerdown");
+    await dispatchPointer(crown.element, "pointerup", {
+      ...primaryPointer,
+      pointerId: 99,
+    });
+    expect(wrapper.emitted("update:mode")).toBeUndefined();
+    expect(crown.attributes("data-pressed")).toBe("true");
+
+    await dispatchPointer(crown.element, "pointercancel");
+    vi.advanceTimersByTime(1000);
+    expect(wrapper.emitted("update:mode")).toBeUndefined();
+    expect(crown.attributes("data-pressed")).toBe("false");
+  });
+
+  it("指针按压期间的键盘事件不会夺走 pointerId 所有权", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountCrown("overview", 2);
+    const crown = wrapper.get("[data-crown-press]");
+
+    await dispatchPointer(crown.element, "pointerdown");
+    await crown.trigger("keydown", { key: "Enter" });
+    await dispatchPointer(crown.element, "pointerup");
+
+    expect(wrapper.emitted("update:mode")).toEqual([["detail"]]);
+    expect(crown.attributes("data-pressed")).toBe("false");
+  });
+
   it("固定在设备约四点钟方向并提供可访问名称与触控约束", () => {
     const wrapper = mountCrown();
 
     expect(wrapper.get("[data-crown-press]").attributes("aria-label")).toContain(
-      "表冠",
+      "当前环境模式",
     );
     expect(wrapper.get("[data-crown-left]").attributes("aria-label")).toContain(
       "上一圈",
@@ -135,5 +237,12 @@ describe("CrownControl", () => {
       /\.crown-control\s*\{[\s\S]*(?:right|inset-inline-end):\s*[^;]+/,
     );
     expect(componentSource).toContain("touch-action: none");
+    expect(componentSource).toContain("@media (forced-colors: active)");
+    expect(componentSource).toMatch(
+      /forced-colors:[\s\S]*(?:outline|border):\s*[^;]*(?:ButtonText|CanvasText)/,
+    );
+    expect(componentSource).toMatch(
+      /\.rotation-control\s*\{[\s\S]*width:\s*(?:1\.5rem|clamp\([^;]*1\.5rem)/,
+    );
   });
 });
