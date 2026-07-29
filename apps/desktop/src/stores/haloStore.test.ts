@@ -78,6 +78,9 @@ const ONLINE_STATUS: AdapterStatus = {
   state: "online",
   mode: "hook",
   message: null,
+  acceptedEvents: 7,
+  ignoredEvents: 1,
+  rejectedEvents: 0,
 };
 
 function createStubBridge(
@@ -420,13 +423,23 @@ describe("createHaloStore", () => {
           state,
           mode: "hook",
           message: state === "online" ? null : `${state} diagnostic`,
+          acceptedEvents: 7,
+          ignoredEvents: 1,
+          rejectedEvents: state === "online" ? 0 : 2,
         }),
       });
       const store = createHaloStore(bridge);
 
       await store.refreshAdapterStatus();
 
-      expect(store.state.adapterStatus.state).toBe(state);
+      expect(store.state.adapterStatus).toStrictEqual({
+        state,
+        mode: "hook",
+        message: state === "online" ? null : `${state} diagnostic`,
+        acceptedEvents: 7,
+        ignoredEvents: 1,
+        rejectedEvents: state === "online" ? 0 : 2,
+      });
     },
   );
 
@@ -442,6 +455,9 @@ describe("createHaloStore", () => {
       state: "degraded",
       mode: "demo",
       message: "浏览器演示模式：未连接 Codex Hook",
+      acceptedEvents: 0,
+      ignoredEvents: 0,
+      rejectedEvents: 0,
     });
 
     const updated = await bridge.simulateSignal({

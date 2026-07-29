@@ -36,6 +36,9 @@ const INITIAL_ADAPTER_STATUS: AdapterStatus = {
   state: "offline",
   mode: "hook",
   message: "适配器状态尚未读取",
+  acceptedEvents: 0,
+  ignoredEvents: 0,
+  rejectedEvents: 0,
 };
 
 function errorCode(error: unknown): string {
@@ -132,6 +135,9 @@ export function createHaloStore(bridge: HaloBridge = haloBridge) {
         state: "offline",
         mode: "hook",
         message: "无法读取适配器状态",
+        acceptedEvents: 0,
+        ignoredEvents: 0,
+        rejectedEvents: 0,
       };
       recordError("adapterStatus", error);
     }

@@ -83,6 +83,9 @@ const DEMO_ADAPTER_STATUS: AdapterStatus = {
   state: "degraded",
   mode: "demo",
   message: "浏览器演示模式：未连接 Codex Hook",
+  acceptedEvents: 0,
+  ignoredEvents: 0,
+  rejectedEvents: 0,
 };
 
 function emptySlot(index: number): RingSlot {

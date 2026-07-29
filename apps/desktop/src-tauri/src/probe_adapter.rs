@@ -3,6 +3,7 @@ use crate::domain::normalize::normalize_signal;
 use chrono::DateTime;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::{BinaryHeap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Take};
@@ -68,7 +69,10 @@ pub fn resolve_probe_dir(
 
 pub struct ProbeAdapter {
     probe_dir: Option<PathBuf>,
-    cursor: Option<OsString>,
+    // Worker-lifetime file identities only. Event contents are never retained
+    // or persisted, and the set is cleared across an unavailable-directory
+    // episode because the spool may have been rotated under the same path.
+    processed_files: HashSet<OsString>,
     accepted_events: u64,
     ignored_events: u64,
     rejected_events: u64,
@@ -80,7 +84,7 @@ impl ProbeAdapter {
     pub fn new(probe_dir: Option<PathBuf>) -> Self {
         Self {
             probe_dir,
-            cursor: None,
+            processed_files: HashSet::new(),
             accepted_events: 0,
             ignored_events: 0,
             rejected_events: 0,
@@ -104,7 +108,9 @@ impl ProbeAdapter {
             }
             Err(_) => return self.offline_batch(),
         };
-        let mut filenames = Vec::new();
+        // A max-heap lets discovery scan an arbitrarily large spool while
+        // retaining only the lexically earliest bounded batch in memory.
+        let mut filenames = BinaryHeap::with_capacity(MAX_EVENTS_PER_POLL);
         for entry in entries {
             let Ok(entry) = entry else {
                 self.reject();
@@ -114,17 +120,21 @@ impl ProbeAdapter {
             if Path::new(&filename).extension() != Some(OsStr::new("json")) {
                 continue;
             }
-            let is_after_cursor = self.cursor.as_ref().is_none_or(|cursor| filename > *cursor);
-            if is_after_cursor {
+            if self.processed_files.contains(&filename) {
+                continue;
+            }
+            if filenames.len() < MAX_EVENTS_PER_POLL {
+                filenames.push(filename);
+            } else if filenames.peek().is_some_and(|largest| filename < *largest) {
+                filenames.pop();
                 filenames.push(filename);
             }
         }
+        let mut filenames = filenames.into_vec();
         filenames.sort();
-        filenames.truncate(MAX_EVENTS_PER_POLL);
 
         let mut signals = Vec::new();
         for filename in filenames {
-            self.cursor = Some(filename.clone());
             match parse_event_file(&probe_dir.join(&filename)) {
                 Ok(ParsedEvent::Signal(signal)) => {
                     self.accepted_events = self.accepted_events.saturating_add(1);
@@ -136,6 +146,7 @@ impl ProbeAdapter {
                 }
                 Err(()) => self.reject(),
             }
+            self.processed_files.insert(filename);
         }
 
         let state = if self.has_safety_rejections {
@@ -158,6 +169,7 @@ impl ProbeAdapter {
         if !self.offline_episode {
             self.rejected_events = self.rejected_events.saturating_add(1);
             self.offline_episode = true;
+            self.processed_files.clear();
         }
         PollBatch {
             signals: Vec::new(),
@@ -427,6 +439,99 @@ mod tests {
         assert_eq!(second.signals[1].received_at_ms, 1_785_052_809_000);
         assert!(adapter.poll().signals.is_empty());
         assert_eq!(second.status.accepted_events, 130);
+    }
+
+    #[test]
+    fn a_late_arriving_lexically_smaller_filename_is_still_processed_once() {
+        let directory = TestDir::new();
+        directory.write(
+            "200.json",
+            &event("PreToolUse", "0123456789abcdef", "2026-07-26T08:00:02Z"),
+        );
+        let mut adapter = ProbeAdapter::new(Some(directory.path().to_path_buf()));
+        assert_eq!(adapter.poll().signals.len(), 1);
+
+        directory.write(
+            "100.json",
+            &event("PostToolUse", "0123456789abcdef", "2026-07-26T08:00:01Z"),
+        );
+        let late = adapter.poll();
+        assert_eq!(late.signals.len(), 1);
+        assert_eq!(late.signals[0].received_at_ms, 1_785_052_801_000);
+        assert_eq!(late.status.accepted_events, 2);
+        assert!(adapter.poll().signals.is_empty());
+    }
+
+    #[test]
+    fn offline_directory_rotation_rebuilds_seen_names_for_lower_and_reused_names() {
+        let parent = TestDir::new();
+        let probe_dir = parent.path().join("rotating-probe");
+        fs::create_dir(&probe_dir).expect("initial probe directory must be created");
+        fs::write(
+            probe_dir.join("200.json"),
+            event("PreToolUse", "0123456789abcdef", "2026-07-26T08:00:02Z"),
+        )
+        .expect("initial event must be written");
+        let mut adapter = ProbeAdapter::new(Some(probe_dir.clone()));
+        assert_eq!(adapter.poll().signals.len(), 1);
+
+        fs::remove_dir_all(&probe_dir).expect("test probe generation must rotate");
+        let offline = adapter.poll();
+        assert_eq!(offline.status.state, AdapterState::Offline);
+        fs::create_dir(&probe_dir).expect("next probe generation must be created");
+        fs::write(
+            probe_dir.join("100.json"),
+            event("Stop", "1111111111111111", "2026-07-26T08:00:03Z"),
+        )
+        .expect("lower-name event must be written");
+        fs::write(
+            probe_dir.join("200.json"),
+            event("Stop", "2222222222222222", "2026-07-26T08:00:04Z"),
+        )
+        .expect("reused-name event must be written");
+
+        let recovered = adapter.poll();
+        assert_eq!(recovered.status.state, AdapterState::Online);
+        assert_eq!(recovered.signals.len(), 2);
+        assert_eq!(recovered.status.accepted_events, 3);
+        let task_keys: Vec<_> = recovered
+            .signals
+            .iter()
+            .map(|signal| signal.task_key.as_str())
+            .collect();
+        assert_eq!(task_keys, vec!["1111111111111111", "2222222222222222"]);
+    }
+
+    #[test]
+    fn invalid_file_is_counted_and_marked_seen_only_once() {
+        let directory = TestDir::new();
+        directory.write("broken.json", "{");
+        let mut adapter = ProbeAdapter::new(Some(directory.path().to_path_buf()));
+
+        assert_eq!(adapter.poll().status.rejected_events, 1);
+        assert_eq!(adapter.poll().status.rejected_events, 1);
+        assert_eq!(adapter.poll().status.rejected_events, 1);
+    }
+
+    #[test]
+    fn discovery_keeps_at_most_128_candidates_and_eventually_drains_large_spools() {
+        let directory = TestDir::new();
+        for index in (0..1_025).rev() {
+            directory.write(
+                &format!("{index:04}.json"),
+                &event("PreToolUse", "0123456789abcdef", "2026-07-26T08:00:00Z"),
+            );
+        }
+        let mut adapter = ProbeAdapter::new(Some(directory.path().to_path_buf()));
+        let mut processed = 0;
+        for _ in 0..9 {
+            let batch = adapter.poll();
+            assert!(batch.signals.len() <= MAX_EVENTS_PER_POLL);
+            processed += batch.signals.len();
+        }
+
+        assert_eq!(processed, 1_025);
+        assert!(adapter.poll().signals.is_empty());
     }
 
     #[test]

@@ -89,4 +89,7 @@ export interface AdapterStatus {
   state: AdapterState;
   mode: AdapterMode;
   message: string | null;
+  acceptedEvents: number;
+  ignoredEvents: number;
+  rejectedEvents: number;
 }

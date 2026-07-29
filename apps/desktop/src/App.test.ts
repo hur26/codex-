@@ -19,6 +19,9 @@ const {
       state: "offline",
       mode: "hook",
       message: "适配器状态尚未读取",
+      acceptedEvents: 0,
+      ignoredEvents: 0,
+      rejectedEvents: 0,
     } as AdapterStatus,
     loading: false,
     error: null as { operation: string; code: string; message: string } | null,
@@ -113,6 +116,9 @@ describe("App control center", () => {
       state: "degraded",
       mode: "demo",
       message: "浏览器演示模式",
+      acceptedEvents: 0,
+      ignoredEvents: 0,
+      rejectedEvents: 0,
     };
     fakeState.loading = false;
     fakeState.error = null;
@@ -212,6 +218,9 @@ describe("App control center", () => {
       state,
       mode: "hook",
       message: null,
+      acceptedEvents: 4,
+      ignoredEvents: 1,
+      rejectedEvents: 0,
     };
     const wrapper = mount(App);
 
@@ -229,6 +238,9 @@ describe("App control center", () => {
       state: "offline",
       mode: "demo",
       message: "未连接 Hook",
+      acceptedEvents: 0,
+      ignoredEvents: 0,
+      rejectedEvents: 1,
     };
     fakeState.snapshot = null;
 
