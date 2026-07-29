@@ -73,6 +73,7 @@ pub enum PayloadField {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PayloadError {
     RingIndexOutOfRange { index: u8 },
+    SnapshotRingIndexMismatch { position: u8, index: u8 },
     SelectedRingOutOfRange { selected_ring: u8 },
     PercentageOutOfRange { field: PayloadField, value: u16 },
     LabelNotEmpty,
@@ -88,11 +89,12 @@ impl DeviceSnapshot {
                 .selected_slot
                 .and_then(|index| u8::try_from(index).ok())
                 .filter(|index| *index < RING_COUNT),
-            rings: array::from_fn(|index| {
-                snapshot
-                    .slots
-                    .get(index)
-                    .map_or_else(|| DeviceRing::empty(index as u8), |slot| slot.into())
+            rings: array::from_fn(|position| {
+                let index = canonical_ring_index(position);
+                snapshot.slots.get(position).map_or_else(
+                    || DeviceRing::empty(index),
+                    |slot| DeviceRing::from_slot(index, slot),
+                )
             }),
         }
     }
@@ -106,7 +108,17 @@ impl DeviceSnapshot {
         let encoded_rings = self
             .rings
             .iter()
-            .map(DeviceRing::encode_payload)
+            .enumerate()
+            .map(|(position, ring)| {
+                let position = canonical_ring_index(position);
+                if ring.index != position {
+                    return Err(PayloadError::SnapshotRingIndexMismatch {
+                        position,
+                        index: ring.index,
+                    });
+                }
+                ring.encode_payload()
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let capacity = 12 + encoded_rings.iter().map(Vec::len).sum::<usize>();
         let mut payload = Vec::with_capacity(capacity);
@@ -179,6 +191,18 @@ impl DeviceRing {
             speed_percent: effect.speed_percent(),
             direction: effect.direction().into(),
             tail_percent: effect.tail_percent(),
+            label: Vec::new(),
+        }
+    }
+
+    fn from_slot(index: u8, slot: &RingSlot) -> Self {
+        Self {
+            index,
+            status: slot.status.into(),
+            brightness: slot.effect.brightness(),
+            speed_percent: slot.effect.speed_percent(),
+            direction: slot.effect.direction().into(),
+            tail_percent: slot.effect.tail_percent(),
             label: Vec::new(),
         }
     }
@@ -269,26 +293,16 @@ impl From<Direction> for DeviceDirection {
     }
 }
 
-impl From<&RingSlot> for DeviceRing {
-    fn from(slot: &RingSlot) -> Self {
-        Self {
-            index: slot.index as u8,
-            status: slot.status.into(),
-            brightness: slot.effect.brightness(),
-            speed_percent: slot.effect.speed_percent(),
-            direction: slot.effect.direction().into(),
-            tail_percent: slot.effect.tail_percent(),
-            label: Vec::new(),
-        }
-    }
-}
-
 fn encode_selected_ring(selected_ring: Option<u8>) -> Result<u8, PayloadError> {
     match selected_ring {
         Some(selected_ring) if selected_ring < RING_COUNT => Ok(selected_ring),
         Some(selected_ring) => Err(PayloadError::SelectedRingOutOfRange { selected_ring }),
         None => Ok(NO_SELECTED_RING),
     }
+}
+
+fn canonical_ring_index(position: usize) -> u8 {
+    u8::try_from(position).expect("fixed four-ring array positions always fit in u8")
 }
 
 fn validate_percentage(field: PayloadField, value: u16) -> Result<(), PayloadError> {
@@ -369,6 +383,53 @@ mod tests {
         assert_eq!(projected.display_mode, DeviceDisplayMode::Detail);
         assert!(!String::from_utf8_lossy(&payload).contains("0123456789abcdef"));
         assert!(projected.rings.iter().all(|ring| ring.label.is_empty()));
+    }
+
+    #[test]
+    fn projection_canonicalizes_malformed_short_and_long_slot_vectors() {
+        let mut malformed = base_snapshot();
+        malformed.slots[0].index = 300;
+        malformed.slots[1].index = usize::MAX;
+        malformed.slots[2].index = 0;
+        malformed.slots[3].index = 1;
+        malformed.slots.push(malformed.slots[0].clone());
+        assert_eq!(
+            DeviceSnapshot::from_halo(&malformed)
+                .rings
+                .map(|ring| ring.index),
+            [0, 1, 2, 3]
+        );
+
+        malformed.slots.truncate(2);
+        let projected = DeviceSnapshot::from_halo(&malformed);
+        assert_eq!(projected.rings.clone().map(|ring| ring.index), [0, 1, 2, 3]);
+        assert_eq!(projected.rings[2].status, DeviceTaskStatus::Idle);
+        assert_eq!(projected.rings[3].status, DeviceTaskStatus::Idle);
+    }
+
+    #[test]
+    fn full_snapshot_encoding_rejects_duplicate_or_reordered_ring_indices() {
+        let snapshot = DeviceSnapshot::from_halo(&base_snapshot());
+        let mut duplicate = snapshot.clone();
+        duplicate.rings[1].index = 0;
+        assert_eq!(
+            duplicate.encode_payload(),
+            Err(PayloadError::SnapshotRingIndexMismatch {
+                position: 1,
+                index: 0,
+            })
+        );
+
+        let mut reordered = snapshot;
+        reordered.rings[1].index = 2;
+        reordered.rings[2].index = 1;
+        assert_eq!(
+            reordered.encode_payload(),
+            Err(PayloadError::SnapshotRingIndexMismatch {
+                position: 1,
+                index: 2,
+            })
+        );
     }
 
     #[test]
