@@ -158,7 +158,7 @@ impl Decoder {
             let actual_crc = crc16_ccitt_false(&self.buffer[MAGIC.len()..frame_length - CRC_BYTES]);
             if actual_crc != expected_crc {
                 decoded.push(Err(ProtocolError::CrcMismatch));
-                self.resynchronize();
+                self.buffer.drain(..frame_length);
                 continue;
             }
 
@@ -307,7 +307,25 @@ mod tests {
     }
 
     #[test]
-    fn encodes_all_published_golden_vectors() {
+    fn crc_error_ignores_false_magic_inside_the_completed_bad_frame() {
+        let false_header = decode_hex("4348012000000002");
+        let mut corrupt = encode(&Frame::new(MessageType::Diagnostics, 9, false_header))
+            .expect("fixture encodes");
+        *corrupt.last_mut().expect("fixture has CRC") ^= 0xff;
+        corrupt.extend(decode_hex("43480120020000006cae"));
+        let mut decoder = Decoder::default();
+
+        assert_eq!(
+            decoder.push(&corrupt),
+            vec![
+                Err(ProtocolError::CrcMismatch),
+                Ok(Frame::new(MessageType::Heartbeat, 2, vec![]))
+            ]
+        );
+    }
+
+    #[test]
+    fn encodes_and_decodes_all_published_golden_vectors() {
         let vectors = include_str!("../../../../../docs/protocol/golden-vectors.tsv");
         for line in vectors.lines().skip(1) {
             let columns: Vec<_> = line.split('\t').collect();
@@ -323,6 +341,27 @@ mod tests {
                 hex(&encode(&frame).expect("golden frame encodes")),
                 columns[4]
             );
+            let mut decoder = Decoder::default();
+            assert_eq!(
+                decoder.push(&decode_hex(columns[4])),
+                vec![Ok(frame)],
+                "golden frame decodes: {}",
+                columns[0]
+            );
         }
+    }
+
+    #[test]
+    fn round_trips_a_frame_with_the_maximum_payload() {
+        let payload = (0..MAX_PAYLOAD)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let frame = Frame::new(MessageType::Diagnostics, u16::MAX, payload);
+        let encoded = encode(&frame).expect("maximum payload encodes");
+        assert_eq!(encoded.len(), HEADER_BYTES + MAX_PAYLOAD + CRC_BYTES);
+
+        let mut decoder = Decoder::default();
+        assert!(decoder.push(&encoded[..257]).is_empty());
+        assert_eq!(decoder.push(&encoded[257..]), vec![Ok(frame)]);
     }
 }
