@@ -3,6 +3,7 @@ use crate::domain::effects::{Direction, EffectParameter, EffectProfile, EffectVa
 use crate::domain::engine::EngineError;
 use crate::domain::model::{HaloSnapshot, SignalKind, SignalSource, TaskKey, TaskSignal};
 use crate::domain::normalize::normalize_signal;
+use crate::probe_adapter::AdapterStatus;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -105,6 +106,13 @@ pub fn get_snapshot(state: tauri::State<'_, AppState>) -> Result<HaloSnapshot, C
 }
 
 #[tauri::command]
+pub fn get_adapter_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<AdapterStatus, CommandError> {
+    get_adapter_status_inner(&state)
+}
+
+#[tauri::command]
 pub fn simulate_signal(
     state: tauri::State<'_, AppState>,
     input: Option<Value>,
@@ -166,6 +174,14 @@ fn get_snapshot_inner(state: &AppState) -> Result<HaloSnapshot, CommandError> {
         .lock()
         .map_err(|_| CommandError::StateUnavailable)?;
     Ok(engine.snapshot())
+}
+
+fn get_adapter_status_inner(state: &AppState) -> Result<AdapterStatus, CommandError> {
+    state
+        .adapter_status
+        .lock()
+        .map(|status| status.clone())
+        .map_err(|_| CommandError::StateUnavailable)
 }
 
 fn simulate_signal_wire_inner(
@@ -415,6 +431,23 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&snapshot).unwrap()["deviceMode"],
             "virtual"
+        );
+    }
+
+    #[test]
+    fn adapter_status_command_exposes_only_the_safe_serializable_contract() {
+        let status = get_adapter_status_inner(&state()).expect("fresh status must be readable");
+
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!({
+                "state": "offline",
+                "mode": "hook",
+                "message": "Hook 事件目录不可用",
+                "acceptedEvents": 0,
+                "ignoredEvents": 0,
+                "rejectedEvents": 0
+            })
         );
     }
 
