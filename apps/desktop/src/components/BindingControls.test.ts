@@ -442,6 +442,61 @@ describe("App binding orchestration", () => {
     expect(fakeState.snapshot?.slots[0].locked).toBe(true);
   });
 
+  it("锁定圈拒绝队列任务绑定后保留选择与快照并显示错误", async () => {
+    const queuedTaskKey = "3333333333333333";
+    const queuedTask = task(queuedTaskKey);
+    mountedState.snapshot = {
+      ...initialSnapshot,
+      revision: 2,
+      slots: [
+        { ...initialSnapshot.slots[0], locked: true },
+        ...initialSnapshot.slots.slice(1),
+      ],
+      tasks: [...initialSnapshot.tasks, queuedTask],
+      queue: [{ ...queuedTask, status: "queued" }],
+    };
+    const lockedSnapshot = mountedState.snapshot;
+    manualBindMock.mockImplementation(async () => {
+      mountedState.error = {
+        operation: "manualBind",
+        code: "slotLocked",
+        message: "manualBind 操作失败",
+      };
+      return null;
+    });
+    const wrapper = mount(App);
+    const rail = wrapper.findComponent(TaskRail);
+    const controls = wrapper.findComponent(BindingControls);
+
+    await rail.vm.$emit("select-task", queuedTaskKey);
+    await nextTick();
+    expect(controls.props("selectedTask")).toMatchObject({
+      taskKey: queuedTaskKey,
+    });
+    expect(controls.props("selectedSlot")).toBeNull();
+
+    await controls.get('[data-bind-slot="0"]').trigger("click");
+    await flushPromises();
+
+    expect(manualBindMock).toHaveBeenCalledWith({
+      taskKey: queuedTaskKey,
+      slot: 0,
+      lock: false,
+    });
+    expect(mountedState.snapshot).toBe(lockedSnapshot);
+    expect(mountedState.snapshot?.slots[0]).toMatchObject({
+      taskKey: PRIVATE_TASK_KEY,
+      locked: true,
+    });
+    expect(controls.props("selectedTask")).toMatchObject({
+      taskKey: queuedTaskKey,
+    });
+    expect(controls.props("selectedSlot")).toBeNull();
+    expect(wrapper.get("[data-app-error]").text()).toContain(
+      "manualBind 操作失败",
+    );
+  });
+
   it("dragend、Escape、窗口失焦和源节点移除都会取消活动拖拽", async () => {
     const wrapper = mount(App);
     const rail = wrapper.findComponent(TaskRail);

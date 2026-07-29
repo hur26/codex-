@@ -28,6 +28,7 @@ pub enum EngineError {
     SlotOutOfBounds { slot: usize },
     TaskNotFound { task_key: TaskKey },
     EmptySlot { slot: usize },
+    SlotLocked { slot: usize },
     InvalidEffect { error: EffectValidationError },
 }
 
@@ -39,6 +40,7 @@ impl fmt::Display for EngineError {
                 write!(formatter, "task {} does not exist", task_key.as_str())
             }
             Self::EmptySlot { slot } => write!(formatter, "slot {slot} is empty"),
+            Self::SlotLocked { slot } => write!(formatter, "slot {slot} is locked"),
             Self::InvalidEffect { error } => error.fmt(formatter),
         }
     }
@@ -127,6 +129,21 @@ impl HaloEngine {
             .iter()
             .position(|candidate| candidate.task_key.as_ref() == Some(task));
 
+        if self.slots[slot].locked {
+            if current_slot == Some(slot)
+                && self.slots[slot].binding_mode == BindingMode::Manual
+                && lock
+            {
+                return Ok(());
+            }
+            return Err(EngineError::SlotLocked { slot });
+        }
+        if let Some(current_slot) = current_slot {
+            if self.slots[current_slot].locked {
+                return Err(EngineError::SlotLocked { slot: current_slot });
+            }
+        }
+
         if current_slot == Some(slot) {
             let changed = self.slots[slot].binding_mode != BindingMode::Manual
                 || self.slots[slot].locked != lock;
@@ -168,6 +185,15 @@ impl HaloEngine {
     pub fn swap_slots(&mut self, left: usize, right: usize) -> Result<(), EngineError> {
         self.validate_slot(left)?;
         self.validate_slot(right)?;
+        if left == right {
+            return Ok(());
+        }
+        if self.slots[left].locked {
+            return Err(EngineError::SlotLocked { slot: left });
+        }
+        if self.slots[right].locked {
+            return Err(EngineError::SlotLocked { slot: right });
+        }
 
         let before = self.slots.clone();
         let left_effect = self.slots[left].effect.clone();
@@ -476,13 +502,81 @@ mod tests {
     }
 
     #[test]
-    fn swapping_slots_preserves_each_complete_slot_payload() {
+    fn manual_binding_cannot_overwrite_a_locked_slot() {
+        let mut engine = HaloEngine::new(300_000);
+        for value in 1..=5 {
+            engine.apply_signal(signal(value, TaskStatus::Running, value * 100));
+        }
+        engine.toggle_lock(0).expect("occupied slot can be locked");
+        let before = engine.snapshot();
+
+        assert_eq!(
+            engine.manual_bind(&key(5), 0, false),
+            Err(EngineError::SlotLocked { slot: 0 })
+        );
+
+        assert_eq!(engine.snapshot(), before);
+        assert_eq!(engine.snapshot().slots[0].task_key, Some(key(1)));
+        assert!(engine.snapshot().slots[0].locked);
+        assert_eq!(engine.snapshot().queue[0].task_key, key(5));
+
+        assert_eq!(
+            engine.manual_bind(&key(1), 1, false),
+            Err(EngineError::SlotLocked { slot: 0 })
+        );
+        assert_eq!(
+            engine.manual_bind(&key(1), 0, false),
+            Err(EngineError::SlotLocked { slot: 0 })
+        );
+        assert_eq!(engine.snapshot(), before);
+    }
+
+    #[test]
+    fn explicit_unlock_allows_a_previously_locked_slot_to_be_rebound() {
+        let mut engine = HaloEngine::new(300_000);
+        for value in 1..=5 {
+            engine.apply_signal(signal(value, TaskStatus::Running, value * 100));
+        }
+        engine.toggle_lock(0).expect("occupied slot can be locked");
+
+        engine
+            .toggle_lock(0)
+            .expect("locked slot can be explicitly unlocked");
+        engine
+            .manual_bind(&key(5), 0, false)
+            .expect("unlocked slot can be rebound");
+
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.slots[0].task_key, Some(key(5)));
+        assert!(!snapshot.slots[0].locked);
+    }
+
+    #[test]
+    fn swapping_cannot_move_or_overwrite_a_locked_slot() {
+        let mut engine = HaloEngine::new(300_000);
+        engine.apply_signal(signal(1, TaskStatus::Running, 100));
+        engine.apply_signal(signal(2, TaskStatus::Running, 200));
+        engine.toggle_lock(0).expect("occupied slot can be locked");
+        let before = engine.snapshot();
+
+        assert_eq!(
+            engine.swap_slots(0, 1),
+            Err(EngineError::SlotLocked { slot: 0 })
+        );
+        assert_eq!(engine.snapshot(), before);
+    }
+
+    #[test]
+    fn swapping_unlocked_slots_preserves_each_complete_slot_payload() {
         let mut engine = HaloEngine::new(300_000);
         engine.apply_signal(signal(1, TaskStatus::Running, 100));
         engine.apply_signal(signal(2, TaskStatus::Waiting, 200));
         engine
             .manual_bind(&key(1), 0, true)
             .expect("known task can be manually bound");
+        engine
+            .toggle_lock(0)
+            .expect("slot must be explicitly unlocked before swapping");
 
         let before = engine.snapshot();
         let left_payload = before.slots[0].clone();
@@ -519,6 +613,9 @@ mod tests {
         engine
             .manual_bind(&key(1), 0, true)
             .expect("known task can be manually bound");
+        engine
+            .toggle_lock(0)
+            .expect("slot must be explicitly unlocked before swapping");
         engine
             .update_effect(
                 0,
@@ -747,10 +844,12 @@ mod tests {
 
         engine.toggle_lock(0).expect("lock changes state");
         assert_eq!(engine.snapshot().revision, 4);
+        engine.toggle_lock(0).expect("unlock changes state");
+        assert_eq!(engine.snapshot().revision, 5);
         engine
             .set_global_brightness(50)
             .expect("brightness changes state");
-        assert_eq!(engine.snapshot().revision, 5);
+        assert_eq!(engine.snapshot().revision, 6);
         engine
             .update_effect(
                 0,
@@ -758,17 +857,17 @@ mod tests {
                     .expect("test profile is valid"),
             )
             .expect("effect changes state");
-        assert_eq!(engine.snapshot().revision, 6);
-        engine.apply_signal(signal(2, TaskStatus::Running, 200));
         assert_eq!(engine.snapshot().revision, 7);
-        engine.swap_slots(0, 1).expect("different assignments swap");
+        engine.apply_signal(signal(2, TaskStatus::Running, 200));
         assert_eq!(engine.snapshot().revision, 8);
+        engine.swap_slots(0, 1).expect("different assignments swap");
+        assert_eq!(engine.snapshot().revision, 9);
 
         assert!(engine.set_global_brightness(101).is_err());
         assert!(engine.toggle_lock(4).is_err());
         assert_eq!(
             engine.snapshot().revision,
-            8,
+            9,
             "failed changes never advance"
         );
     }

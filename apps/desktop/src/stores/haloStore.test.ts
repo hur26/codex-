@@ -800,6 +800,42 @@ describe("TauriHaloBridge", () => {
     expect(dimmed.globalBrightness).toBe(75);
   });
 
+  it("演示 bridge 拒绝覆盖或交换锁定圈且保持快照原子不变", async () => {
+    const bridge = createDemoHaloBridge();
+    for (let value = 1; value <= 5; value += 1) {
+      await bridge.simulateSignal({
+        taskKey: `000000000000000${value}`,
+        signalKind: "preToolUse",
+        receivedAtMs: value * 100,
+      });
+    }
+    await bridge.manualBind({
+      taskKey: "0000000000000001",
+      slot: 0,
+      lock: true,
+    });
+    const before = await bridge.getSnapshot();
+
+    await expect(
+      bridge.manualBind({
+        taskKey: "0000000000000005",
+        slot: 0,
+        lock: false,
+      }),
+    ).rejects.toStrictEqual({ code: "slotLocked", slot: 0 });
+    await expect(bridge.swapSlots(0, 1)).rejects.toStrictEqual({
+      code: "slotLocked",
+      slot: 0,
+    });
+
+    expect(await bridge.getSnapshot()).toStrictEqual(before);
+    expect(before.slots[0]).toMatchObject({
+      taskKey: "0000000000000001",
+      locked: true,
+    });
+    expect(before.queue[0].taskKey).toBe("0000000000000005");
+  });
+
   it("演示 bridge 的第五任务进入带可信来源的 queued 快照", async () => {
     const bridge = createDemoHaloBridge();
     for (let task = 1; task <= 5; task += 1) {

@@ -49,6 +49,7 @@ pub enum CommandError {
     SlotOutOfBounds { slot: usize },
     TaskNotFound { task_key: String },
     EmptySlot { slot: usize },
+    SlotLocked { slot: usize },
     InvalidEffect { error: EffectValidationError },
     StateUnavailable,
 }
@@ -79,6 +80,7 @@ impl fmt::Display for CommandError {
             Self::SlotOutOfBounds { slot } => write!(formatter, "slot {slot} is out of bounds"),
             Self::TaskNotFound { task_key } => write!(formatter, "task {task_key} does not exist"),
             Self::EmptySlot { slot } => write!(formatter, "slot {slot} is empty"),
+            Self::SlotLocked { slot } => write!(formatter, "slot {slot} is locked"),
             Self::InvalidEffect { error } => error.fmt(formatter),
             Self::StateUnavailable => formatter.write_str("virtual device state is unavailable"),
         }
@@ -95,6 +97,7 @@ impl From<EngineError> for CommandError {
                 task_key: task_key.as_str().to_owned(),
             },
             EngineError::EmptySlot { slot } => Self::EmptySlot { slot },
+            EngineError::SlotLocked { slot } => Self::SlotLocked { slot },
             EngineError::InvalidEffect { error } => Self::InvalidEffect { error },
         }
     }
@@ -548,6 +551,41 @@ mod tests {
         assert_eq!(reset.global_brightness, 100);
         assert!(reset.tasks.is_empty());
         assert!(reset.slots.iter().all(|slot| slot.task_key.is_none()));
+    }
+
+    #[test]
+    fn locked_slot_rejection_is_structured_and_keeps_command_snapshot_atomic() {
+        let state = state();
+        for value in 1..=5 {
+            simulate_signal_inner(
+                &state,
+                running(&format!("{value:016x}"), u64::try_from(value).unwrap()),
+            )
+            .unwrap();
+        }
+        toggle_lock_inner(&state, 0).unwrap();
+        let before = get_snapshot_inner(&state).unwrap();
+
+        assert_eq!(
+            manual_bind_inner(
+                &state,
+                ManualBindInput {
+                    task_key: "0000000000000005".to_owned(),
+                    slot: 0,
+                    lock: false,
+                },
+            ),
+            Err(CommandError::SlotLocked { slot: 0 })
+        );
+        assert_eq!(
+            swap_slots_inner(&state, 0, 1),
+            Err(CommandError::SlotLocked { slot: 0 })
+        );
+        assert_eq!(get_snapshot_inner(&state).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(CommandError::SlotLocked { slot: 0 }).unwrap(),
+            serde_json::json!({ "code": "slotLocked", "slot": 0 })
+        );
     }
 
     #[test]

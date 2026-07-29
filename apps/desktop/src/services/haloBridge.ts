@@ -313,6 +313,19 @@ class DemoHaloBridge implements HaloBridge {
     const current = this.snapshot.slots.find(
       (slot) => slot.taskKey === task.taskKey,
     );
+    if (target.locked) {
+      if (
+        current?.index === target.index &&
+        target.bindingMode === "manual" &&
+        input.lock
+      ) {
+        return this.currentSnapshot();
+      }
+      throw { code: "slotLocked", slot: target.index };
+    }
+    if (current?.locked) {
+      throw { code: "slotLocked", slot: current.index };
+    }
     if (current?.index === target.index) {
       const changed =
         target.bindingMode !== "manual" || target.locked !== input.lock;
@@ -350,7 +363,16 @@ class DemoHaloBridge implements HaloBridge {
   async swapSlots(left: number, right: number): Promise<HaloSnapshot> {
     const leftSlot = assertSlot(this.snapshot, left);
     const rightSlot = assertSlot(this.snapshot, right);
-    if (left === right || sameSlotAssignment(leftSlot, rightSlot)) {
+    if (left === right) {
+      return this.currentSnapshot();
+    }
+    if (leftSlot.locked) {
+      throw { code: "slotLocked", slot: left };
+    }
+    if (rightSlot.locked) {
+      throw { code: "slotLocked", slot: right };
+    }
+    if (sameSlotAssignment(leftSlot, rightSlot)) {
       return this.currentSnapshot();
     }
     const leftEffect = { ...leftSlot.effect };

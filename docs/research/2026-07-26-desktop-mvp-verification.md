@@ -40,10 +40,10 @@ Tauri 下载 WiX 工具时发生 `timeout: global`，不是应用编译失败，
 | 验证命令 | 实际结果 |
 |---|---|
 | `python -m unittest discover -s tests -p 'test_*.py'` | 共 64 项：63 通过，1 跳过 |
-| `npm test` | 10 个测试文件、124 项测试全部通过 |
+| `npm test` | 10 个测试文件、126 项测试全部通过 |
 | `npm run typecheck` | 通过 |
 | `npm run build` | 通过；Vite 转换 40 个模块 |
-| `cargo test --manifest-path src-tauri/Cargo.toml` | 51 项测试全部通过；main 与 doc tests 为 0 项 |
+| `cargo test --manifest-path src-tauri/Cargo.toml` | 55 项测试全部通过；main 与 doc tests 为 0 项 |
 | `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` | 通过 |
 | `npm audit --audit-level=high` | 0 个已知漏洞 |
 
@@ -91,6 +91,20 @@ Python 唯一跳过项是符号链接拒绝测试。当前 Windows 会话创建�
 
 这些观察不包含任何任务指纹或内容，也不扩展为未实际执行的交互结论。
 
+### 合成探针桌面验收
+
+2026-07-29 还通过本地脱敏 probe 目录执行了合成事件桌面验收：
+
+- 合成 `PreToolUse` 事件使四个圆环均被任务占用，并出现额外队列项；
+- 合成 `PermissionRequest` 在桌面 UI 中显示候选等待信号；
+- 合成 `Stop` 显示绿色“本轮完成”，没有宣称任务永久完成；
+- 本轮产生的 8 个合成事件文件在验收结束后已清理。
+
+这些结果验证的是合成探针文件经生产 adapter 到桌面 UI 的链路，不是真实
+Codex 桌面进程执行 Hook 的证据，也没有测量小于 1 秒的端到端延迟。验收中还
+发现手动绑定可覆盖锁定圈的缺陷；该缺陷随后通过领域层不变量和自动回归测试
+修复，但尚未在打包后的窗口中重新执行同一人工步骤。
+
 **未生成：**
 `D:\Project\codex-halo\apps\desktop\src-tauri\target\release\bundle\msi\`。
 本轮 MSI 阻塞点是 WiX 下载网络超时，未观察到 VBSCRIPT 错误。
@@ -130,8 +144,8 @@ Hook 任务身份隔离，不是本次打包程序的 UI 路由或显示延迟�
 |---|---|---|---|
 | 无硬件时显示 `VIRTUAL DEVICE`，无 USB 依赖 | App 组件测试和无 USB 实现 | release 实机显示正常且无 USB 错误 | 通过 |
 | 四圈动画与 reduced-motion | 组件、样式测试 | 四圈静态呈现已观察；动画与 reduced-motion 未操作 | 部分人工验证 |
-| 五任务、拖拽、键盘绑定、锁定、交换、灯效编辑 | Store/组件测试 | R01 选择、编辑解锁和亮度写回已验证；其余未逐项操作 | 部分人工验证 |
-| waiting 候选标记、Stop“本轮完成” | 实时集成与组件测试 | 活动总线观察到匿名任务“本轮完成”；waiting 未观察 | 部分人工验证 |
+| 五任务、拖拽、键盘绑定、锁定、交换、灯效编辑 | Store/组件测试 | 合成事件已验证四圈和额外队列；R01 选择、编辑解锁和亮度写回已验证；其余未逐项复验 | 部分人工验证 |
+| waiting 候选标记、Stop“本轮完成” | 实时集成与组件测试 | 合成 `PermissionRequest` 候选等待与合成 `Stop` 绿色“本轮完成”已观察 | 合成链路通过，真实 Hook 未验证 |
 | 表冠和中央屏模式 | 组件测试 | `AMBIENT` → `OVERVIEW` 及四圈总览已观察 | 通过 |
 | Adapter 状态与 Hook 来源 | 实时集成测试 | 实机显示 `ONLINE / HOOK`，R01 为 Hook/已观测 | 通过 |
 | 两个真实任务不串圈且小于 1 秒 | 上游匿名身份 Gate 通过 | 验收 B 已运行，但当前桌面进程未执行 Hook，probe 无新增文件 | 阻断，未验证 |
