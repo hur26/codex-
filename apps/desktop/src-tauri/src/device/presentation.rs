@@ -5,7 +5,8 @@ use std::array;
 const RING_COUNT: u8 = 4;
 const NO_SELECTED_RING: u8 = 0xff;
 const MAX_PERCENT: u16 = 100;
-const MAX_LABEL_LENGTH: usize = 32;
+const MIN_SPEED_PERCENT: u16 = 25;
+const MAX_SPEED_PERCENT: u16 = 300;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceSnapshot {
@@ -74,8 +75,7 @@ pub enum PayloadError {
     RingIndexOutOfRange { index: u8 },
     SelectedRingOutOfRange { selected_ring: u8 },
     PercentageOutOfRange { field: PayloadField, value: u16 },
-    LabelTooLong { length: usize },
-    LabelNotUtf8,
+    LabelNotEmpty,
 }
 
 impl DeviceSnapshot {
@@ -153,26 +153,20 @@ impl DeviceRing {
             return Err(PayloadError::RingIndexOutOfRange { index: self.index });
         }
         validate_percentage(PayloadField::RingBrightness, u16::from(self.brightness))?;
-        validate_percentage(PayloadField::SpeedPercent, self.speed_percent)?;
+        validate_speed_percent(self.speed_percent)?;
         validate_percentage(PayloadField::TailPercent, u16::from(self.tail_percent))?;
-        if self.label.len() > MAX_LABEL_LENGTH {
-            return Err(PayloadError::LabelTooLong {
-                length: self.label.len(),
-            });
-        }
-        if std::str::from_utf8(&self.label).is_err() {
-            return Err(PayloadError::LabelNotUtf8);
+        if !self.label.is_empty() {
+            return Err(PayloadError::LabelNotEmpty);
         }
 
-        let mut payload = Vec::with_capacity(8 + self.label.len());
+        let mut payload = Vec::with_capacity(8);
         payload.push(self.index);
         payload.push(self.status.wire_value());
         payload.push(self.brightness);
         payload.extend_from_slice(&self.speed_percent.to_le_bytes());
         payload.push(self.direction.wire_value());
         payload.push(self.tail_percent);
-        payload.push(self.label.len() as u8);
-        payload.extend_from_slice(&self.label);
+        payload.push(0);
         Ok(payload)
     }
 
@@ -302,6 +296,17 @@ fn validate_percentage(field: PayloadField, value: u16) -> Result<(), PayloadErr
         Ok(())
     } else {
         Err(PayloadError::PercentageOutOfRange { field, value })
+    }
+}
+
+fn validate_speed_percent(value: u16) -> Result<(), PayloadError> {
+    if (MIN_SPEED_PERCENT..=MAX_SPEED_PERCENT).contains(&value) {
+        Ok(())
+    } else {
+        Err(PayloadError::PercentageOutOfRange {
+            field: PayloadField::SpeedPercent,
+            value,
+        })
     }
 }
 
@@ -436,6 +441,28 @@ mod tests {
     }
 
     #[test]
+    fn projected_speed_three_hundred_encodes_as_little_endian_u16() {
+        let mut halo = base_snapshot();
+        halo.slots[0].effect = EffectProfile::new(50, 300, Direction::Clockwise, 25)
+            .expect("domain speed must allow three hundred percent");
+        let projected = DeviceSnapshot::from_halo(&halo);
+
+        let payload = projected.rings[0]
+            .encode_payload()
+            .expect("protocol must encode a valid domain speed");
+
+        assert_eq!(&payload[3..5], &[0x2c, 0x01]);
+    }
+
+    #[test]
+    fn encoding_rejects_non_empty_labels_even_when_short_utf8() {
+        let mut ring = DeviceSnapshot::from_halo(&base_snapshot()).rings[0].clone();
+        ring.label = b"safe".to_vec();
+
+        assert_eq!(ring.encode_payload(), Err(PayloadError::LabelNotEmpty));
+    }
+
+    #[test]
     fn payload_encoders_reject_protocol_bound_violations() {
         let mut ring = DeviceSnapshot::from_halo(&base_snapshot()).rings[0].clone();
         ring.index = 4;
@@ -445,24 +472,23 @@ mod tests {
         );
 
         ring.index = 0;
-        ring.speed_percent = 101;
+        ring.speed_percent = 24;
         assert_eq!(
             ring.encode_payload(),
             Err(PayloadError::PercentageOutOfRange {
                 field: PayloadField::SpeedPercent,
-                value: 101,
+                value: 24,
             })
         );
 
-        ring.speed_percent = 100;
-        ring.label = vec![b'a'; 33];
+        ring.speed_percent = 301;
         assert_eq!(
             ring.encode_payload(),
-            Err(PayloadError::LabelTooLong { length: 33 })
+            Err(PayloadError::PercentageOutOfRange {
+                field: PayloadField::SpeedPercent,
+                value: 301,
+            })
         );
-
-        ring.label = vec![0xff];
-        assert_eq!(ring.encode_payload(), Err(PayloadError::LabelNotUtf8));
         assert_eq!(
             DeviceUpdate::Display {
                 mode: DeviceDisplayMode::Detail,
