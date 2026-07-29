@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 
 const DEFAULT_FEATURE_FLAGS: u16 = 0x0003;
 const DEFAULT_MAX_PAYLOAD: u16 = 512;
+const RECENT_STATE_WRITE_LIMIT: usize = 64;
 const RING_COUNT: usize = 4;
 const RING_PAYLOAD_BYTES: usize = 8;
 const FULL_SNAPSHOT_PREFIX_BYTES: usize = 12;
@@ -36,6 +37,7 @@ pub enum Fault {
     NackOnce(NackReason),
     MalformedNackOnce,
     UnknownNackReasonOnce(u8),
+    AckBatchWithFutureOnce(MessageType),
     CorruptCrcOnce,
 }
 
@@ -48,6 +50,7 @@ struct PendingResponse {
 enum ResponseFault {
     Timeout,
     CorruptCrc,
+    AckBatchWithFuture(MessageType),
 }
 
 pub struct SimulatedTransport {
@@ -61,6 +64,8 @@ pub struct SimulatedTransport {
     next_knob_sequence: u16,
     applied_snapshot: Option<DeviceSnapshot>,
     state_write_log: Vec<(MessageType, u16)>,
+    state_write_count: usize,
+    full_snapshot_count: usize,
     heartbeat_count: usize,
     max_pending_response_count: usize,
 }
@@ -78,6 +83,8 @@ impl Default for SimulatedTransport {
             next_knob_sequence: 0,
             applied_snapshot: None,
             state_write_log: Vec::new(),
+            state_write_count: 0,
+            full_snapshot_count: 0,
             heartbeat_count: 0,
             max_pending_response_count: 0,
         }
@@ -106,14 +113,11 @@ impl SimulatedTransport {
     }
 
     pub fn full_snapshot_count(&self) -> usize {
-        self.state_write_log
-            .iter()
-            .filter(|(message_type, _)| *message_type == MessageType::FullSnapshot)
-            .count()
+        self.full_snapshot_count
     }
 
     pub fn state_write_count(&self) -> usize {
-        self.state_write_log.len()
+        self.state_write_count
     }
 
     pub fn state_write_log(&self) -> &[(MessageType, u16)] {
@@ -166,6 +170,13 @@ impl SimulatedTransport {
                 | MessageType::DisplayMode
                 | MessageType::Brightness
         ) {
+            self.state_write_count = self.state_write_count.saturating_add(1);
+            if frame.message_type == MessageType::FullSnapshot {
+                self.full_snapshot_count = self.full_snapshot_count.saturating_add(1);
+            }
+            if self.state_write_log.len() == RECENT_STATE_WRITE_LIMIT {
+                self.state_write_log.remove(0);
+            }
             self.state_write_log
                 .push((frame.message_type, frame.sequence));
         }
@@ -192,6 +203,9 @@ impl SimulatedTransport {
                 );
             }
             Some(Fault::TimeoutOnce) => Some(ResponseFault::Timeout),
+            Some(Fault::AckBatchWithFutureOnce(message_type)) => {
+                Some(ResponseFault::AckBatchWithFuture(message_type))
+            }
             Some(Fault::CorruptCrcOnce) => Some(ResponseFault::CorruptCrc),
             None => None,
         };
@@ -306,16 +320,32 @@ impl SimulatedTransport {
         response: Frame,
         fault: Option<ResponseFault>,
     ) -> Result<(), TransportError> {
-        let mut bytes = protocol::encode(&response)?;
+        let mut bytes = self.encode_response(&response)?;
+        let fault = match fault {
+            Some(ResponseFault::AckBatchWithFuture(message_type)) => {
+                bytes.extend(self.encode_response(&Frame::new(
+                    MessageType::Ack,
+                    response.sequence.wrapping_add(1),
+                    vec![message_type as u8],
+                ))?);
+                None
+            }
+            fault => fault,
+        };
+        self.responses.push_back(PendingResponse { bytes, fault });
+        self.max_pending_response_count = self.max_pending_response_count.max(self.responses.len());
+        Ok(())
+    }
+
+    fn encode_response(&self, response: &Frame) -> Result<Vec<u8>, TransportError> {
+        let mut bytes = protocol::encode(response)?;
         if self.protocol_major != PROTOCOL_MAJOR {
             bytes[2] = self.protocol_major;
             let crc_offset = bytes.len() - 2;
             let crc = protocol::crc16_ccitt_false(&bytes[2..crc_offset]);
             bytes[crc_offset..].copy_from_slice(&crc.to_le_bytes());
         }
-        self.responses.push_back(PendingResponse { bytes, fault });
-        self.max_pending_response_count = self.max_pending_response_count.max(self.responses.len());
-        Ok(())
+        Ok(bytes)
     }
 }
 
@@ -371,6 +401,7 @@ impl DeviceTransport for SimulatedTransport {
                 }
                 Ok(response.bytes)
             }
+            Some(ResponseFault::AckBatchWithFuture(_)) => Ok(response.bytes),
             None => Ok(response.bytes),
         }
     }
@@ -622,6 +653,45 @@ mod tests {
         assert_eq!(applied.display_mode, DeviceDisplayMode::Overview);
         assert_eq!(applied.selected_ring, None);
         assert_eq!(applied.global_brightness, 55);
+    }
+
+    #[test]
+    fn state_write_instrumentation_keeps_bounded_recent_history_and_cumulative_counts() {
+        let mut simulator = SimulatedTransport::default();
+        connect(&mut simulator);
+        let snapshot = fixture_device_snapshot();
+        write_frame(
+            &mut simulator,
+            Frame::new(
+                MessageType::FullSnapshot,
+                1,
+                snapshot.encode_payload().unwrap(),
+            ),
+        );
+        simulator.read().unwrap();
+
+        for offset in 0..200_u16 {
+            write_frame(
+                &mut simulator,
+                Frame::new(
+                    MessageType::Brightness,
+                    offset + 2,
+                    vec![(offset % 101) as u8],
+                ),
+            );
+            simulator.read().unwrap();
+        }
+
+        assert_eq!(simulator.state_write_count(), 201);
+        assert_eq!(simulator.full_snapshot_count(), 1);
+        assert_eq!(
+            simulator.state_write_log().len(),
+            super::RECENT_STATE_WRITE_LIMIT
+        );
+        assert!(simulator
+            .state_write_log()
+            .iter()
+            .all(|(message_type, _)| *message_type == MessageType::Brightness));
     }
 
     #[test]

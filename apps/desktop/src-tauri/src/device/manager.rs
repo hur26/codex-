@@ -65,6 +65,23 @@ struct PendingRequest {
     expected: ExpectedResponse,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingRequestToken {
+    sequence: u16,
+    retries: u8,
+    expected: ExpectedResponse,
+}
+
+impl PendingRequest {
+    fn token(&self) -> PendingRequestToken {
+        PendingRequestToken {
+            sequence: self.sequence,
+            retries: self.retries,
+            expected: self.expected,
+        }
+    }
+}
+
 struct OutboundWrite {
     message_type: MessageType,
     payload: Vec<u8>,
@@ -227,10 +244,11 @@ impl<T: DeviceTransport> DeviceManager<T> {
                 }
             };
 
+            let batch_request = self.pending.as_ref().map(PendingRequest::token);
             let decoded = self.decoder.push(&bytes);
             for result in decoded {
                 match result {
-                    Ok(frame) => self.handle_frame(frame, now_ms, snapshot, intents),
+                    Ok(frame) => self.handle_frame(frame, batch_request, now_ms, snapshot, intents),
                     Err(ProtocolError::UnsupportedVersion { .. }) => {
                         self.mark_incompatible("Protocol major is incompatible");
                     }
@@ -246,6 +264,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
     fn handle_frame(
         &mut self,
         frame: Frame,
+        batch_request: Option<PendingRequestToken>,
         now_ms: u64,
         snapshot: &HaloSnapshot,
         intents: &mut Vec<PresentationIntent>,
@@ -257,10 +276,10 @@ impl<T: DeviceTransport> DeviceManager<T> {
             return;
         }
 
-        let Some(pending) = self.pending.as_ref() else {
+        let (Some(batch_request), Some(pending)) = (batch_request, self.pending.as_ref()) else {
             return;
         };
-        if frame.sequence != pending.sequence {
+        if pending.token() != batch_request || frame.sequence != batch_request.sequence {
             return;
         }
 
@@ -283,6 +302,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
                     && frame.payload == [expected_type as u8] =>
             {
                 self.pending = None;
+                self.status.message = None;
                 self.begin_next_write(now_ms);
             }
             ExpectedResponse::Ack(expected_type)
@@ -785,6 +805,37 @@ mod tests {
     }
 
     #[test]
+    fn future_ack_from_the_same_read_batch_cannot_ack_the_next_write() {
+        let mut manager = online_manager();
+        manager
+            .transport_mut()
+            .script(Fault::AckBatchWithFutureOnce(MessageType::Brightness));
+        manager.transport_mut().script(Fault::TimeoutOnce);
+        let mut changed = fixture_halo_snapshot();
+        changed.revision = 2;
+        changed.slots[0].status = TaskStatus::Waiting;
+        changed.global_brightness = 50;
+
+        manager.step(10, &changed);
+
+        assert_eq!(manager.applied_snapshot.as_ref().unwrap().revision, 1);
+        assert_eq!(manager.metrics().retry_count, 0);
+        assert_eq!(
+            manager.transport().state_write_log(),
+            &[
+                (MessageType::FullSnapshot, 1),
+                (MessageType::RingUpdate, 2),
+                (MessageType::Brightness, 3),
+            ]
+        );
+
+        manager.step(260, &changed);
+        assert_eq!(manager.applied_snapshot.as_ref().unwrap().revision, 1);
+        manager.step(261, &changed);
+        assert_eq!(manager.applied_snapshot.as_ref().unwrap().revision, 2);
+    }
+
+    #[test]
     fn malformed_and_unknown_nacks_wait_for_timeout_before_retrying() {
         for fault in [Fault::MalformedNackOnce, Fault::UnknownNackReasonOnce(0xff)] {
             let mut manager = online_manager();
@@ -894,6 +945,27 @@ mod tests {
                 .global_brightness,
             50
         );
+    }
+
+    #[test]
+    fn successful_ack_clears_the_transient_retry_message() {
+        let mut manager = online_manager();
+        manager.transport_mut().script(Fault::TimeoutOnce);
+        let mut changed = fixture_halo_snapshot();
+        changed.revision = 2;
+        changed.global_brightness = 50;
+
+        manager.step(10, &changed);
+        manager.step(260, &changed);
+        assert_eq!(
+            manager.status().message.as_deref(),
+            Some("Device response timed out")
+        );
+
+        manager.step(261, &changed);
+
+        assert_eq!(manager.status().message, None);
+        assert_eq!(manager.status().state, DeviceConnectionState::Virtual);
     }
 
     #[test]
