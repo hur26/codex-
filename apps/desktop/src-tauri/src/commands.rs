@@ -1,7 +1,9 @@
 use crate::app_state::{AppState, ROUND_COMPLETE_HOLD_MS};
 use crate::domain::effects::{Direction, EffectParameter, EffectProfile, EffectValidationError};
 use crate::domain::engine::EngineError;
-use crate::domain::model::{HaloSnapshot, SignalKind, SignalSource, TaskKey, TaskSignal};
+use crate::domain::model::{
+    DisplayMode, HaloSnapshot, SignalKind, SignalSource, TaskKey, TaskSignal,
+};
 use crate::domain::normalize::normalize_signal;
 use crate::probe_adapter::AdapterStatus;
 use serde::de::DeserializeOwned;
@@ -35,6 +37,13 @@ pub struct UpdateEffectInput {
     pub tail_percent: u16,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetPresentationInput {
+    pub display_mode: String,
+    pub selected_slot: Option<usize>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "code",
@@ -46,6 +55,7 @@ pub enum CommandError {
     InvalidTaskKey,
     UnknownSignalKind { signal_kind: String },
     UnknownDirection { direction: String },
+    UnknownDisplayMode { display_mode: String },
     SlotOutOfBounds { slot: usize },
     TaskNotFound { task_key: String },
     EmptySlot { slot: usize },
@@ -76,6 +86,9 @@ impl fmt::Display for CommandError {
             }
             Self::UnknownDirection { direction } => {
                 write!(formatter, "unknown effect direction: {direction}")
+            }
+            Self::UnknownDisplayMode { display_mode } => {
+                write!(formatter, "unknown display mode: {display_mode}")
             }
             Self::SlotOutOfBounds { slot } => write!(formatter, "slot {slot} is out of bounds"),
             Self::TaskNotFound { task_key } => write!(formatter, "task {task_key} does not exist"),
@@ -162,6 +175,14 @@ pub fn set_global_brightness(
     value: Option<Value>,
 ) -> Result<HaloSnapshot, CommandError> {
     set_global_brightness_wire_inner(&state, value)
+}
+
+#[tauri::command]
+pub fn set_presentation(
+    state: tauri::State<'_, AppState>,
+    input: Option<Value>,
+) -> Result<HaloSnapshot, CommandError> {
+    set_presentation_wire_inner(&state, input)
 }
 
 #[tauri::command]
@@ -309,6 +330,25 @@ fn set_global_brightness_inner(state: &AppState, value: u16) -> Result<HaloSnaps
     })
 }
 
+fn set_presentation_wire_inner(
+    state: &AppState,
+    input: Option<Value>,
+) -> Result<HaloSnapshot, CommandError> {
+    set_presentation_inner(state, parse_wire_argument(input, CommandArgument::Input)?)
+}
+
+fn set_presentation_inner(
+    state: &AppState,
+    input: SetPresentationInput,
+) -> Result<HaloSnapshot, CommandError> {
+    let display_mode = parse_display_mode(input.display_mode)?;
+    mutate_and_snapshot(state, |engine| {
+        engine
+            .set_presentation(display_mode, input.selected_slot)
+            .map_err(CommandError::from)
+    })
+}
+
 fn reset_virtual_device_inner(state: &AppState) -> Result<HaloSnapshot, CommandError> {
     let mut engine = match state.engine.lock() {
         Ok(engine) => engine,
@@ -378,6 +418,17 @@ fn parse_direction(value: String) -> Result<Direction, CommandError> {
     }
 }
 
+fn parse_display_mode(value: String) -> Result<DisplayMode, CommandError> {
+    match value.as_str() {
+        "ambient" => Ok(DisplayMode::Ambient),
+        "overview" => Ok(DisplayMode::Overview),
+        "detail" => Ok(DisplayMode::Detail),
+        _ => Err(CommandError::UnknownDisplayMode {
+            display_mode: value,
+        }),
+    }
+}
+
 fn validated_u8(
     field: EffectParameter,
     actual: u16,
@@ -425,10 +476,78 @@ mod tests {
     }
 
     #[test]
+    fn presentation_wire_boundary_accepts_camel_case_and_returns_stable_errors() {
+        let state = state();
+
+        let snapshot = set_presentation_wire_inner(
+            &state,
+            Some(serde_json::json!({
+                "displayMode": "overview",
+                "selectedSlot": 2
+            })),
+        )
+        .expect("valid presentation input must reach the domain");
+        assert_eq!(snapshot.display_mode, DisplayMode::Overview);
+        assert_eq!(snapshot.selected_slot, Some(2));
+
+        assert_eq!(
+            set_presentation_wire_inner(
+                &state,
+                Some(serde_json::json!({
+                    "displayMode": "diagnostics",
+                    "selectedSlot": 2
+                })),
+            ),
+            Err(CommandError::UnknownDisplayMode {
+                display_mode: "diagnostics".to_owned()
+            })
+        );
+
+        for value in [
+            serde_json::json!({"displayMode": "detail", "selectedSlot": -1}),
+            serde_json::json!({
+                "displayMode": "detail",
+                "selectedSlot": 2,
+                "extra": true
+            }),
+        ] {
+            assert_eq!(
+                set_presentation_wire_inner(&state, Some(value)),
+                Err(CommandError::InvalidInput {
+                    argument: CommandArgument::Input,
+                })
+            );
+        }
+
+        assert_eq!(
+            set_presentation_wire_inner(
+                &state,
+                Some(serde_json::json!({
+                    "displayMode": "detail",
+                    "selectedSlot": 4
+                })),
+            ),
+            Err(CommandError::SlotOutOfBounds { slot: 4 })
+        );
+        assert_eq!(
+            serde_json::to_value(CommandError::UnknownDisplayMode {
+                display_mode: "diagnostics".to_owned()
+            })
+            .unwrap(),
+            serde_json::json!({
+                "code": "unknownDisplayMode",
+                "displayMode": "diagnostics"
+            })
+        );
+    }
+
+    #[test]
     fn initial_snapshot_has_four_empty_slots_in_virtual_mode() {
         let snapshot = get_snapshot_inner(&state()).expect("fresh state must be readable");
 
         assert_eq!(snapshot.device_mode, DeviceMode::Virtual);
+        assert_eq!(snapshot.display_mode, DisplayMode::Ambient);
+        assert_eq!(snapshot.selected_slot, None);
         assert_eq!(snapshot.slots.len(), 4);
         assert!(snapshot.slots.iter().all(|slot| slot.task_key.is_none()));
         assert_eq!(
@@ -545,10 +664,23 @@ mod tests {
         let dimmed = set_global_brightness_inner(&state, 30).unwrap();
         assert_eq!(dimmed.global_brightness, 30);
 
+        let presented = set_presentation_inner(
+            &state,
+            SetPresentationInput {
+                display_mode: "detail".to_owned(),
+                selected_slot: Some(3),
+            },
+        )
+        .unwrap();
+        assert_eq!(presented.display_mode, DisplayMode::Detail);
+        assert_eq!(presented.selected_slot, Some(3));
+
         let reset = reset_virtual_device_inner(&state).unwrap();
-        assert_eq!(reset.revision, dimmed.revision + 1);
+        assert_eq!(reset.revision, presented.revision + 1);
         assert_eq!(reset.device_mode, DeviceMode::Virtual);
         assert_eq!(reset.global_brightness, 100);
+        assert_eq!(reset.display_mode, DisplayMode::Ambient);
+        assert_eq!(reset.selected_slot, None);
         assert!(reset.tasks.is_empty());
         assert!(reset.slots.iter().all(|slot| slot.task_key.is_none()));
     }

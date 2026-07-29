@@ -29,6 +29,7 @@ pub fn run() {
             commands::swap_slots,
             commands::update_effect,
             commands::set_global_brightness,
+            commands::set_presentation,
             commands::reset_virtual_device
         ])
         .build(tauri::generate_context!())

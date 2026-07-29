@@ -1,6 +1,7 @@
 use crate::domain::effects::{validate_global_brightness, EffectProfile, EffectValidationError};
 use crate::domain::model::{
-    BindingMode, DeviceMode, HaloSnapshot, RingSlot, TaskKey, TaskRecord, TaskSignal, TaskStatus,
+    BindingMode, DeviceMode, DisplayMode, HaloSnapshot, PresentationIntent, RingSlot, TaskKey,
+    TaskRecord, TaskSignal, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,6 +14,8 @@ pub struct HaloEngine {
     round_complete_hold_ms: u64,
     revision: u64,
     global_brightness: u8,
+    display_mode: DisplayMode,
+    selected_slot: Option<usize>,
     tasks: HashMap<TaskKey, TaskRecord>,
     slots: Vec<RingSlot>,
     queue: Vec<TaskKey>,
@@ -56,6 +59,8 @@ impl HaloEngine {
             round_complete_hold_ms,
             revision: 0,
             global_brightness: 100,
+            display_mode: DisplayMode::Ambient,
+            selected_slot: None,
             tasks: HashMap::new(),
             slots,
             queue: Vec::new(),
@@ -229,6 +234,58 @@ impl HaloEngine {
         Ok(())
     }
 
+    pub fn set_presentation(
+        &mut self,
+        display_mode: DisplayMode,
+        selected_slot: Option<usize>,
+    ) -> Result<(), EngineError> {
+        if let Some(slot) = selected_slot {
+            self.validate_slot(slot)?;
+        }
+        if self.display_mode == display_mode && self.selected_slot == selected_slot {
+            return Ok(());
+        }
+
+        self.display_mode = display_mode;
+        self.selected_slot = selected_slot;
+        self.advance_revision();
+        Ok(())
+    }
+
+    pub fn apply_presentation_intent(&mut self, intent: PresentationIntent) {
+        let (display_mode, selected_slot) = match intent {
+            PresentationIntent::Rotate(0) => return,
+            PresentationIntent::Rotate(delta) => {
+                let selected_slot = match self.selected_slot {
+                    Some(slot) => {
+                        let slot = i16::try_from(slot).expect("slot index fits in i16");
+                        Some(
+                            usize::try_from(
+                                (slot + i16::from(delta)).rem_euclid(SLOT_COUNT as i16),
+                            )
+                            .expect("wrapped slot index is non-negative"),
+                        )
+                    }
+                    None if delta > 0 => Some(0),
+                    None => Some(SLOT_COUNT - 1),
+                };
+                (self.display_mode, selected_slot)
+            }
+            PresentationIntent::ShortPress => {
+                let display_mode = match self.display_mode {
+                    DisplayMode::Ambient => DisplayMode::Overview,
+                    DisplayMode::Overview => DisplayMode::Detail,
+                    DisplayMode::Detail => DisplayMode::Ambient,
+                };
+                (display_mode, self.selected_slot)
+            }
+            PresentationIntent::LongPress => (DisplayMode::Ambient, self.selected_slot),
+        };
+
+        self.set_presentation(display_mode, selected_slot)
+            .expect("presentation intent always produces a valid slot");
+    }
+
     pub fn tick(&mut self, now_ms: u64) {
         let releasable: Vec<_> = self
             .slots
@@ -283,6 +340,8 @@ impl HaloEngine {
             revision: self.revision,
             device_mode: DeviceMode::Virtual,
             global_brightness: self.global_brightness,
+            display_mode: self.display_mode,
+            selected_slot: self.selected_slot,
             slots: self.slots.clone(),
             tasks,
             queue,
@@ -379,7 +438,8 @@ mod tests {
     use super::*;
     use crate::domain::effects::{Direction, EffectProfile};
     use crate::domain::model::{
-        BindingMode, Confidence, NormalizedState, SignalSource, TaskKey, TaskSignal, TaskStatus,
+        BindingMode, Confidence, DisplayMode, NormalizedState, PresentationIntent, SignalSource,
+        TaskKey, TaskSignal, TaskStatus,
     };
 
     fn key(value: u64) -> TaskKey {
@@ -396,6 +456,63 @@ mod tests {
             },
             received_at_ms,
         }
+    }
+
+    #[test]
+    fn presentation_intents_cycle_modes_and_wrap_ring_selection() {
+        let mut engine = HaloEngine::new(300_000);
+        assert_eq!(engine.snapshot().display_mode, DisplayMode::Ambient);
+        assert_eq!(engine.snapshot().selected_slot, None);
+
+        let mut reverse_engine = HaloEngine::new(300_000);
+        reverse_engine.apply_presentation_intent(PresentationIntent::Rotate(-1));
+        assert_eq!(reverse_engine.snapshot().selected_slot, Some(3));
+
+        engine.apply_presentation_intent(PresentationIntent::Rotate(1));
+        assert_eq!(engine.snapshot().selected_slot, Some(0));
+        engine.apply_presentation_intent(PresentationIntent::Rotate(-1));
+        assert_eq!(engine.snapshot().selected_slot, Some(3));
+
+        engine.apply_presentation_intent(PresentationIntent::ShortPress);
+        assert_eq!(engine.snapshot().display_mode, DisplayMode::Overview);
+        engine.apply_presentation_intent(PresentationIntent::ShortPress);
+        assert_eq!(engine.snapshot().display_mode, DisplayMode::Detail);
+        engine.apply_presentation_intent(PresentationIntent::ShortPress);
+        assert_eq!(engine.snapshot().display_mode, DisplayMode::Ambient);
+        engine.apply_presentation_intent(PresentationIntent::LongPress);
+        assert_eq!(engine.snapshot().display_mode, DisplayMode::Ambient);
+    }
+
+    #[test]
+    fn presentation_revision_advances_only_for_actual_state_changes() {
+        let mut engine = HaloEngine::new(300_000);
+
+        engine
+            .set_presentation(DisplayMode::Overview, Some(2))
+            .unwrap();
+        assert_eq!(engine.snapshot().revision, 1);
+
+        engine
+            .set_presentation(DisplayMode::Overview, Some(2))
+            .unwrap();
+        engine.apply_presentation_intent(PresentationIntent::Rotate(0));
+        assert_eq!(engine.snapshot().revision, 1);
+
+        engine.apply_presentation_intent(PresentationIntent::LongPress);
+        assert_eq!(engine.snapshot().revision, 2);
+        assert_eq!(engine.snapshot().display_mode, DisplayMode::Ambient);
+        assert_eq!(engine.snapshot().selected_slot, Some(2));
+    }
+
+    #[test]
+    fn invalid_presentation_slot_is_rejected_without_advancing_revision() {
+        let mut engine = HaloEngine::new(300_000);
+        let before = engine.snapshot();
+        assert_eq!(
+            engine.set_presentation(DisplayMode::Detail, Some(4)),
+            Err(EngineError::SlotOutOfBounds { slot: 4 })
+        );
+        assert_eq!(engine.snapshot(), before);
     }
 
     #[test]

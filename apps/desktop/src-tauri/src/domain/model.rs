@@ -53,6 +53,21 @@ pub enum DeviceMode {
     Virtual,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DisplayMode {
+    Ambient,
+    Overview,
+    Detail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentationIntent {
+    Rotate(i8),
+    ShortPress,
+    LongPress,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TaskKey(String);
 
@@ -151,6 +166,8 @@ pub struct HaloSnapshot {
     pub revision: u64,
     pub device_mode: DeviceMode,
     pub global_brightness: u8,
+    pub display_mode: DisplayMode,
+    pub selected_slot: Option<usize>,
     pub slots: Vec<RingSlot>,
     pub tasks: Vec<TaskRecord>,
     pub queue: Vec<TaskRecord>,
