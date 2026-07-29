@@ -43,6 +43,21 @@ async function dispatchPointer(
   await nextTick();
 }
 
+async function dispatchKey(
+  element: Element,
+  type: "keydown" | "keyup",
+  key: "Enter" | " ",
+) {
+  const event = new KeyboardEvent(type, {
+    key,
+    bubbles: true,
+    cancelable: true,
+  });
+  element.dispatchEvent(event);
+  await nextTick();
+  return event;
+}
+
 describe("CrownControl", () => {
   it.each([
     ["ambient", "overview"],
@@ -202,13 +217,19 @@ describe("CrownControl", () => {
     expect(crown.attributes("data-pressed")).toBe("false");
   });
 
-  it("指针按压期间的键盘事件不会夺走 pointerId 所有权", async () => {
+  it("完整键盘按键序列不会夺走或结束正在进行的指针会话", async () => {
     vi.useFakeTimers();
     const wrapper = mountCrown("overview", 2);
     const crown = wrapper.get("[data-crown-press]");
 
     await dispatchPointer(crown.element, "pointerdown");
-    await crown.trigger("keydown", { key: "Enter" });
+    const keydown = await dispatchKey(crown.element, "keydown", "Enter");
+    await dispatchKey(crown.element, "keyup", "Enter");
+
+    expect(keydown.defaultPrevented).toBe(true);
+    expect(wrapper.emitted("update:mode")).toBeUndefined();
+    expect(crown.attributes("data-pressed")).toBe("true");
+
     await dispatchPointer(crown.element, "pointerup");
 
     expect(wrapper.emitted("update:mode")).toEqual([["detail"]]);

@@ -36,6 +36,8 @@ const crownLabel = computed(
     `表冠，当前${MODE_LABELS[props.mode]}。短按切换模式，长按返回环境模式`,
 );
 
+type PressOwner = "pointer" | "keyboard";
+
 function clearHoldTimer() {
   if (holdTimer !== null) {
     clearTimeout(holdTimer);
@@ -43,11 +45,14 @@ function clearHoldTimer() {
   }
 }
 
-function beginPress() {
-  if (pressActive.value) {
+let pressOwner: PressOwner | null = null;
+
+function beginPress(owner: PressOwner) {
+  if (pressOwner !== null) {
     return;
   }
 
+  pressOwner = owner;
   pressActive.value = true;
   longPressTriggered = false;
   holdTimer = setTimeout(() => {
@@ -72,6 +77,7 @@ function finishPress() {
   }
 
   pressActive.value = false;
+  pressOwner = null;
   activePointerId = null;
   clearHoldTimer();
 
@@ -84,22 +90,27 @@ function finishPress() {
 
 function cancelPress() {
   pressActive.value = false;
+  pressOwner = null;
   longPressTriggered = false;
   activePointerId = null;
   clearHoldTimer();
 }
 
 function beginPointerPress(event: PointerEvent) {
-  if (event.button !== 0 || !event.isPrimary || pressActive.value) {
+  if (event.button !== 0 || !event.isPrimary || pressOwner !== null) {
     return;
   }
 
   activePointerId = event.pointerId;
-  beginPress();
+  beginPress("pointer");
 }
 
 function finishPointerPress(event: PointerEvent) {
-  if (activePointerId === null || event.pointerId !== activePointerId) {
+  if (
+    pressOwner !== "pointer" ||
+    activePointerId === null ||
+    event.pointerId !== activePointerId
+  ) {
     return;
   }
 
@@ -107,7 +118,11 @@ function finishPointerPress(event: PointerEvent) {
 }
 
 function cancelPointerPress(event: PointerEvent) {
-  if (activePointerId === null || event.pointerId !== activePointerId) {
+  if (
+    pressOwner !== "pointer" ||
+    activePointerId === null ||
+    event.pointerId !== activePointerId
+  ) {
     return;
   }
 
@@ -129,13 +144,17 @@ function isActivationKey(event: KeyboardEvent) {
 }
 
 function handleKeyDown(event: KeyboardEvent) {
-  if (!isActivationKey(event) || event.repeat || pressActive.value) {
+  if (!isActivationKey(event)) {
     return;
   }
 
   event.preventDefault();
+  if (event.repeat || pressOwner !== null) {
+    return;
+  }
+
   activePointerId = null;
-  beginPress();
+  beginPress("keyboard");
 }
 
 function handleKeyUp(event: KeyboardEvent) {
@@ -144,6 +163,10 @@ function handleKeyUp(event: KeyboardEvent) {
   }
 
   event.preventDefault();
+  if (pressOwner !== "keyboard") {
+    return;
+  }
+
   finishPress();
 }
 
