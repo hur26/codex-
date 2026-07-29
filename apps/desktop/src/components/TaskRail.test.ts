@@ -133,7 +133,7 @@ describe("TaskRail", () => {
     expect(wrapper.html()).not.toContain(PRIVATE_KEYS.queued);
   });
 
-  it("轨道只读但可选择已绑定圈，不暴露 Task 9 的拖拽或绑定控件", async () => {
+  it("可选择并拖动匿名任务，但绑定与锁定命令仍由外层控制器负责", async () => {
     const wrapper = mount(TaskRail, {
       props: {
         slots,
@@ -147,7 +147,15 @@ describe("TaskRail", () => {
     await wrapper.get('[data-task-slot="2"]').trigger("click");
 
     expect(wrapper.emitted("select")).toEqual([[2]]);
-    expect(wrapper.find("[draggable=true]").exists()).toBe(false);
+    expect(wrapper.emitted("select-task")).toEqual([
+      [PRIVATE_KEYS.completed],
+    ]);
+    expect(
+      wrapper.get('[data-task-slot="2"]').attributes("draggable"),
+    ).toBe("true");
+    expect(
+      wrapper.get('[data-task-slot="3"]').attributes("draggable"),
+    ).toBe("false");
     expect(wrapper.find("[data-bind-control]").exists()).toBe(false);
     expect(wrapper.find("[data-lock-control]").exists()).toBe(false);
   });

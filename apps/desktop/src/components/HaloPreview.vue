@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, type CSSProperties } from "vue";
+import { computed, ref, type CSSProperties } from "vue";
 import type {
+  ActiveDrag,
   Confidence,
   EffectProfile,
   RingSlot,
@@ -20,8 +21,11 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   select: [slot: number];
+  dragstart: [drag: ActiveDrag];
+  drop: [slot: number];
 }>();
 
+const dropTarget = ref<number | null>(null);
 const EMPTY_EFFECT: EffectProfile = {
   brightness: 80,
   speedPercent: 100,
@@ -111,7 +115,49 @@ function ringLabel(slot: RingSlot) {
     : "无可置信度";
   const identity = slot.taskKey ? "匿名任务已绑定" : "无任务";
 
-  return `第 ${slot.index + 1} 圈${position}，${STATUS_LABELS[visualStatus(slot)]}，${identity}，来源 ${source}，${confidence}`;
+  const dropHint = dropTarget.value === slot.index ? "，释放以完成绑定" : "";
+
+  return `第 ${slot.index + 1} 圈${position}，${STATUS_LABELS[visualStatus(slot)]}，${identity}，来源 ${source}，${confidence}${dropHint}`;
+}
+
+function startSlotDrag(event: DragEvent, slot: RingSlot) {
+  if (!slot.taskKey) {
+    return;
+  }
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-codex-halo-drag", "slot");
+  }
+  emit("dragstart", { kind: "slot", slot: slot.index });
+}
+
+function enterDropTarget(event: DragEvent, slot: number) {
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = "move";
+  }
+  dropTarget.value = slot;
+}
+
+function leaveDropTarget(event: DragEvent, slot: number) {
+  const current = event.currentTarget;
+  const next = event.relatedTarget;
+  if (
+    current instanceof Node &&
+    next instanceof Node &&
+    current.contains(next)
+  ) {
+    return;
+  }
+  if (dropTarget.value === slot) {
+    dropTarget.value = null;
+  }
+}
+
+function dropOnSlot(event: DragEvent, slot: number) {
+  event.preventDefault();
+  dropTarget.value = null;
+  emit("drop", slot);
 }
 
 function ringStyle(slot: RingSlot): CSSProperties {
@@ -153,9 +199,16 @@ function ringStyle(slot: RingSlot): CSSProperties {
       :data-source="slot.source ?? 'none'"
       :data-confidence="slot.confidence ?? 'none'"
       :data-selected="selectedSlot === slot.index"
+      :data-drop-active="dropTarget === slot.index"
+      :draggable="slot.taskKey !== null"
       :aria-label="ringLabel(slot)"
       :aria-pressed="selectedSlot === slot.index"
       @click="emit('select', slot.index)"
+      @dragstart="startSlotDrag($event, slot)"
+      @dragenter="enterDropTarget($event, slot.index)"
+      @dragover="enterDropTarget($event, slot.index)"
+      @dragleave="leaveDropTarget($event, slot.index)"
+      @drop.stop="dropOnSlot($event, slot.index)"
     >
       <span class="ring-light" aria-hidden="true" />
       <span class="slot-index" aria-hidden="true">
@@ -344,9 +397,18 @@ function ringStyle(slot: RingSlot): CSSProperties {
 }
 
 .halo-ring:focus-visible::after,
-.halo-ring.selected::after {
+.halo-ring.selected::after,
+.halo-ring[data-drop-active="true"]::after {
   border-color: var(--halo-focus);
   box-shadow: 0 0 0 0.18rem var(--halo-canvas), 0 0 0 0.24rem var(--halo-focus);
+}
+
+.halo-ring[draggable="true"] {
+  cursor: grab;
+}
+
+.halo-ring[draggable="true"]:active {
+  cursor: grabbing;
 }
 
 .status-running {

@@ -69,6 +69,10 @@ export interface ManualBindInput {
   lock: boolean;
 }
 
+export type ActiveDrag =
+  | { kind: "task"; taskKey: TaskKey }
+  | { kind: "slot"; slot: number };
+
 export interface UpdateEffectInput extends EffectProfile {
   slot: number;
 }

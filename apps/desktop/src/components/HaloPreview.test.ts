@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   Confidence,
   RingSlot,
@@ -155,6 +155,61 @@ describe("HaloPreview", () => {
     await wrapper.get('[data-slot="2"]').trigger("click");
 
     expect(wrapper.emitted("select")).toEqual([[2]]);
+  });
+
+  it("只有已绑定圆环可拖动，拖拽载荷仅写安全 marker", async () => {
+    const occupied = createSlot(0, "running", "hook", "observed");
+    const wrapper = mount(HaloPreview, {
+      props: {
+        slots: [occupied, createSlot(1)],
+        selectedSlot: null,
+      },
+    });
+    const dataTransfer = {
+      effectAllowed: "none",
+      setData: vi.fn(),
+    };
+
+    expect(wrapper.get('[data-slot="0"]').attributes("draggable")).toBe("true");
+    expect(wrapper.get('[data-slot="1"]').attributes("draggable")).toBe("false");
+    await wrapper.get('[data-slot="0"]').trigger("dragstart", {
+      dataTransfer,
+    });
+
+    expect(wrapper.emitted("dragstart")).toEqual([
+      [{ kind: "slot", slot: 0 }],
+    ]);
+    expect(dataTransfer.setData).toHaveBeenCalledWith(
+      "application/x-codex-halo-drag",
+      "slot",
+    );
+    expect(dataTransfer.setData).not.toHaveBeenCalledWith(
+      "text/plain",
+      expect.anything(),
+    );
+    expect(dataTransfer.setData.mock.calls.flat().join(" ")).not.toContain(
+      occupied.taskKey,
+    );
+  });
+
+  it("拖入圈位提供可访问反馈并在释放时只发出目标圈位", async () => {
+    const wrapper = mount(HaloPreview, {
+      props: {
+        slots: [createSlot(0), createSlot(1)],
+        selectedSlot: null,
+      },
+    });
+    const ring = wrapper.get('[data-slot="1"]');
+    const dataTransfer = { dropEffect: "none" };
+
+    await ring.trigger("dragenter", { dataTransfer });
+    expect(ring.attributes("data-drop-active")).toBe("true");
+    expect(ring.attributes("aria-label")).toContain("释放以完成绑定");
+    expect(dataTransfer.dropEffect).toBe("move");
+
+    await ring.trigger("drop", { dataTransfer });
+    expect(wrapper.emitted("drop")).toEqual([[1]]);
+    expect(ring.attributes("data-drop-active")).toBe("false");
   });
 
   it("按 25% 到 300% 的完整灯效速度范围换算追逐周期", () => {

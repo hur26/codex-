@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import type {
+  ActiveDrag,
   Confidence,
   RingSlot,
   SignalSource,
@@ -24,6 +25,8 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   select: [slot: number];
+  "select-task": [taskKey: string];
+  dragstart: [drag: ActiveDrag];
 }>();
 
 const railExpanded = ref(false);
@@ -114,7 +117,20 @@ function activityLabel(lastActiveAtMs: number | null) {
 function selectSlot(slot: RingSlot) {
   if (slot.taskKey) {
     emit("select", slot.index);
+    emit("select-task", slot.taskKey);
   }
+}
+
+function selectQueuedTask(taskKey: string) {
+  emit("select-task", taskKey);
+}
+
+function startTaskDrag(event: DragEvent, taskKey: string) {
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-codex-halo-drag", "task");
+  }
+  emit("dragstart", { kind: "task", taskKey });
 }
 </script>
 
@@ -154,9 +170,13 @@ function selectSlot(slot: RingSlot) {
             :data-task-slot="slot.index"
             type="button"
             :disabled="slot.taskKey === null"
+            :draggable="slot.taskKey !== null"
             :aria-current="selectedSlot === slot.index ? 'true' : undefined"
             :aria-label="slot.taskKey ? `选择第 ${slot.index + 1} 圈` : `第 ${slot.index + 1} 圈未绑定`"
             @click="selectSlot(slot)"
+            @dragstart="
+              slot.taskKey && startTaskDrag($event, slot.taskKey)
+            "
           >
             <span class="row-index">{{ String(slot.index + 1).padStart(2, "0") }}</span>
             <span class="row-core">
@@ -197,13 +217,19 @@ function selectSlot(slot: RingSlot) {
             data-queue-task
           >
             <span class="queue-order">{{ String(index + 1).padStart(2, "0") }}</span>
-            <span>
+            <button
+              type="button"
+              draggable="true"
+              aria-label="选择等待队列中的匿名任务"
+              @click="selectQueuedTask(queuedTask.taskKey)"
+              @dragstart="startTaskDrag($event, queuedTask.taskKey)"
+            >
               <strong>QUEUE {{ String(index + 1).padStart(2, "0") }}</strong>
               <small>
                 排队等待 · {{ SOURCE_LABELS[queuedTask.source] }} ·
                 {{ CONFIDENCE_LABELS[queuedTask.confidence] }}
               </small>
-            </span>
+            </button>
             <time>{{ activityLabel(queuedTask.lastActiveAtMs) }}</time>
           </li>
         </ol>
@@ -479,9 +505,21 @@ function selectSlot(slot: RingSlot) {
   background: var(--halo-glass-sheen);
 }
 
-.queue-row span:nth-child(2) {
+.queue-row button {
   display: grid;
   gap: 0.15rem;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: grab;
+}
+
+.queue-row button:focus-visible {
+  outline: 1px solid var(--halo-focus);
+  outline-offset: 0.2rem;
 }
 
 .queue-row small,

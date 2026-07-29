@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import ActivityStrip from "./components/ActivityStrip.vue";
+import BindingControls from "./components/BindingControls.vue";
 import CentralDisplay from "./components/CentralDisplay.vue";
 import CrownControl from "./components/CrownControl.vue";
 import HaloPreview from "./components/HaloPreview.vue";
 import TaskRail from "./components/TaskRail.vue";
 import { createHaloStore } from "./stores/haloStore";
 import type {
+  ActiveDrag,
   AdapterState,
   DisplayMode,
   EffectProfile,
@@ -15,8 +17,11 @@ import type {
 
 const store = createHaloStore();
 const selectedSlot = ref<number | null>(null);
+const selectedTaskKey = ref<string | null>(null);
 const displayMode = ref<DisplayMode>("ambient");
 const renderedAtMs = ref(Date.now());
+const activeDrag = ref<ActiveDrag | null>(null);
+const bindingCommandPending = ref(false);
 let activityClock: number | null = null;
 
 const ADAPTER_LABELS: Record<AdapterState, string> = {
@@ -46,6 +51,14 @@ const emptySlots = Array.from({ length: 4 }, (_, index): RingSlot => ({
 const slots = computed(() => store.state.snapshot?.slots ?? emptySlots);
 const tasks = computed(() => store.state.snapshot?.tasks ?? []);
 const queue = computed(() => store.state.snapshot?.queue ?? []);
+const selectedSlotRecord = computed(
+  () =>
+    slots.value.find((slot) => slot.index === selectedSlot.value) ?? null,
+);
+const selectedTask = computed(
+  () =>
+    tasks.value.find((task) => task.taskKey === selectedTaskKey.value) ?? null,
+);
 const occupiedCount = computed(
   () => slots.value.filter((slot) => slot.taskKey !== null).length,
 );
@@ -55,6 +68,87 @@ function selectSlot(slot: number) {
     return;
   }
   selectedSlot.value = slot;
+  const taskKey =
+    slots.value.find((candidate) => candidate.index === slot)?.taskKey ?? null;
+  if (taskKey) {
+    selectedTaskKey.value = taskKey;
+  }
+}
+
+function selectTask(taskKey: string) {
+  if (!tasks.value.some((task) => task.taskKey === taskKey)) {
+    return;
+  }
+  selectedTaskKey.value = taskKey;
+  selectedSlot.value =
+    slots.value.find((slot) => slot.taskKey === taskKey)?.index ?? null;
+}
+
+function beginDrag(drag: ActiveDrag) {
+  activeDrag.value = drag;
+}
+
+function clearActiveDrag() {
+  activeDrag.value = null;
+}
+
+async function manualBind(taskKey: string, slot: number) {
+  if (
+    bindingCommandPending.value ||
+    slot < 0 ||
+    slot > 3 ||
+    !tasks.value.some((task) => task.taskKey === taskKey)
+  ) {
+    return;
+  }
+  bindingCommandPending.value = true;
+  try {
+    const snapshot = await store.manualBind({ taskKey, slot, lock: false });
+    if (snapshot) {
+      selectedTaskKey.value = taskKey;
+      selectedSlot.value = slot;
+    }
+  } finally {
+    bindingCommandPending.value = false;
+  }
+}
+
+async function toggleLock(slot: number) {
+  if (bindingCommandPending.value || slot < 0 || slot > 3) {
+    return;
+  }
+  bindingCommandPending.value = true;
+  try {
+    await store.toggleLock(slot);
+  } finally {
+    bindingCommandPending.value = false;
+  }
+}
+
+async function dropOnSlot(slot: number) {
+  const drag = activeDrag.value;
+  activeDrag.value = null;
+  if (!drag || bindingCommandPending.value || slot < 0 || slot > 3) {
+    return;
+  }
+
+  if (drag.kind === "task") {
+    await manualBind(drag.taskKey, slot);
+    return;
+  }
+  if (drag.slot === slot) {
+    return;
+  }
+
+  bindingCommandPending.value = true;
+  try {
+    const snapshot = await store.swapSlots(drag.slot, slot);
+    if (snapshot) {
+      selectedSlot.value = slot;
+    }
+  } finally {
+    bindingCommandPending.value = false;
+  }
 }
 
 function updateDisplayMode(mode: DisplayMode) {
@@ -149,6 +243,9 @@ onUnmounted(() => {
         :selected-slot="selectedSlot"
         :now-ms="renderedAtMs"
         @select="selectSlot"
+        @select-task="selectTask"
+        @dragstart="beginDrag"
+        @dragend="clearActiveDrag"
       />
 
       <section class="device-workspace" aria-label="虚拟设备工作区">
@@ -170,6 +267,9 @@ onUnmounted(() => {
             :slots="slots"
             :selected-slot="selectedSlot"
             @select="selectSlot"
+            @dragstart="beginDrag"
+            @drop="dropOnSlot"
+            @dragend="clearActiveDrag"
           />
 
           <div class="device-display-layer" @click.stop>
@@ -187,6 +287,14 @@ onUnmounted(() => {
             @update:mode="updateDisplayMode"
           />
         </div>
+
+        <BindingControls
+          :selected-task="selectedTask"
+          :selected-slot="selectedSlotRecord"
+          :loading="store.state.loading || bindingCommandPending"
+          @bind="manualBind"
+          @toggle-lock="toggleLock"
+        />
 
         <footer class="device-caption">
           <div>
