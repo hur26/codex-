@@ -5,6 +5,7 @@ import type {
   Confidence,
   RingSlot,
   SignalSource,
+  TaskDragOrigin,
   TaskRecord,
   TaskStatus,
 } from "../types/halo";
@@ -126,12 +127,16 @@ function selectQueuedTask(taskKey: string) {
   emit("select-task", taskKey);
 }
 
-function startTaskDrag(event: DragEvent, taskKey: string) {
+function startTaskDrag(
+  event: DragEvent,
+  taskKey: string,
+  origin: TaskDragOrigin,
+) {
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("application/x-codex-halo-drag", "task");
   }
-  emit("dragstart", { kind: "task", taskKey });
+  emit("dragstart", { kind: "task", taskKey, origin });
 }
 
 function finishTaskDrag() {
@@ -180,7 +185,11 @@ function finishTaskDrag() {
             :aria-label="slot.taskKey ? `选择第 ${slot.index + 1} 圈` : `第 ${slot.index + 1} 圈未绑定`"
             @click="selectSlot(slot)"
             @dragstart="
-              slot.taskKey && startTaskDrag($event, slot.taskKey)
+              slot.taskKey &&
+                startTaskDrag($event, slot.taskKey, {
+                  kind: 'slot',
+                  slot: slot.index,
+                })
             "
             @dragend="finishTaskDrag"
           >
@@ -228,7 +237,9 @@ function finishTaskDrag() {
               draggable="true"
               aria-label="选择等待队列中的匿名任务"
               @click="selectQueuedTask(queuedTask.taskKey)"
-              @dragstart="startTaskDrag($event, queuedTask.taskKey)"
+              @dragstart="
+                startTaskDrag($event, queuedTask.taskKey, { kind: 'queue' })
+              "
               @dragend="finishTaskDrag"
             >
               <strong>QUEUE {{ String(index + 1).padStart(2, "0") }}</strong>

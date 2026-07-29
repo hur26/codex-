@@ -220,6 +220,7 @@ describe("App binding orchestration", () => {
     await rail.vm.$emit("dragstart", {
       kind: "task",
       taskKey: PRIVATE_TASK_KEY,
+      origin: { kind: "slot", slot: 0 },
     });
     await preview.vm.$emit("drop", 2);
     await flushPromises();
@@ -292,6 +293,89 @@ describe("App binding orchestration", () => {
     await flushPromises();
 
     expect(swapSlotsMock).not.toHaveBeenCalled();
+  });
+
+  it("队列任务被自动绑定后立即取消旧 queue 拖拽与放置反馈", async () => {
+    const queueTask = task("4444444444444444");
+    queueTask.status = "queued";
+    mountedState.snapshot = {
+      ...initialSnapshot,
+      tasks: [...initialSnapshot.tasks, queueTask],
+      queue: [queueTask],
+    };
+    const wrapper = mount(App);
+    const rail = wrapper.findComponent(TaskRail);
+    const preview = wrapper.findComponent(HaloPreview);
+    const target = preview.get('[data-slot="3"]');
+    const dataTransfer = {
+      effectAllowed: "none",
+      dropEffect: "none",
+      types: ["application/x-codex-halo-drag"],
+      setData: vi.fn(),
+      getData: vi.fn(() => "task"),
+    };
+
+    await rail.get("[data-queue-task] button").trigger("dragstart", {
+      dataTransfer,
+    });
+    await target.trigger("dragenter", { dataTransfer });
+    expect(preview.props("dragActive")).toBe(true);
+    expect(target.attributes("data-drop-active")).toBe("true");
+    expect(wrapper.html()).not.toContain(queueTask.taskKey);
+
+    mountedState.snapshot = {
+      ...initialSnapshot,
+      slots: [
+        ...initialSnapshot.slots.slice(0, 2),
+        slot(2, queueTask.taskKey),
+        initialSnapshot.slots[3],
+      ],
+      tasks: [...initialSnapshot.tasks, queueTask],
+      queue: [],
+    };
+    await nextTick();
+
+    expect(preview.props("dragActive")).toBe(false);
+    expect(target.attributes("data-drop-active")).toBe("false");
+    expect(target.attributes("aria-label")).not.toContain("释放以完成绑定");
+    expect(wrapper.html()).not.toContain(queueTask.taskKey);
+    await target.trigger("drop", { dataTransfer });
+    await flushPromises();
+    expect(manualBindMock).not.toHaveBeenCalled();
+  });
+
+  it("任务行来源圈位发生换位时取消旧 slot-origin 拖拽", async () => {
+    const wrapper = mount(App);
+    const rail = wrapper.findComponent(TaskRail);
+    const preview = wrapper.findComponent(HaloPreview);
+    const dataTransfer = {
+      effectAllowed: "none",
+      dropEffect: "none",
+      types: ["application/x-codex-halo-drag"],
+      setData: vi.fn(),
+      getData: vi.fn(() => "task"),
+    };
+
+    await rail.get('[data-task-slot="0"]').trigger("dragstart", {
+      dataTransfer,
+    });
+    expect(preview.props("dragActive")).toBe(true);
+
+    mountedState.snapshot = {
+      ...initialSnapshot,
+      slots: [
+        slot(0, null),
+        initialSnapshot.slots[1],
+        slot(2, PRIVATE_TASK_KEY),
+        initialSnapshot.slots[3],
+      ],
+    };
+    await nextTick();
+
+    expect(preview.props("dragActive")).toBe(false);
+    await preview.get('[data-slot="3"]').trigger("drop", { dataTransfer });
+    await flushPromises();
+    expect(manualBindMock).not.toHaveBeenCalled();
   });
 
   it("锁按钮连接 store.toggleLock 且命令参数精确", async () => {
@@ -367,6 +451,7 @@ describe("App binding orchestration", () => {
       await rail.vm.$emit("dragstart", {
         kind: "task",
         taskKey: PRIVATE_TASK_KEY,
+        origin: { kind: "slot", slot: 0 },
       });
       await nextTick();
       expect(preview.props("dragActive")).toBe(true);
@@ -379,6 +464,7 @@ describe("App binding orchestration", () => {
     await rail.vm.$emit("dragstart", {
       kind: "task",
       taskKey: PRIVATE_TASK_KEY,
+      origin: { kind: "slot", slot: 0 },
     });
     mountedState.snapshot = {
       ...initialSnapshot,
@@ -409,6 +495,7 @@ describe("App binding orchestration", () => {
     await rail.vm.$emit("dragstart", {
       kind: "task",
       taskKey: PRIVATE_TASK_KEY,
+      origin: { kind: "slot", slot: 0 },
     });
     await nextTick();
 
@@ -442,6 +529,7 @@ describe("App binding orchestration", () => {
     await rail.vm.$emit("dragstart", {
       kind: "task",
       taskKey: PRIVATE_TASK_KEY,
+      origin: { kind: "slot", slot: 0 },
     });
     await preview.vm.$emit("drop", 2);
     await flushPromises();

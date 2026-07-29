@@ -84,10 +84,25 @@ function selectTask(taskKey: string) {
     slots.value.find((slot) => slot.taskKey === taskKey)?.index ?? null;
 }
 
+function taskDragSourceExists(
+  drag: Extract<ActiveDrag, { kind: "task" }>,
+) {
+  if (!tasks.value.some((task) => task.taskKey === drag.taskKey)) {
+    return false;
+  }
+  if (drag.origin.kind === "queue") {
+    return queue.value.some((task) => task.taskKey === drag.taskKey);
+  }
+  const originSlot = drag.origin.slot;
+  return slots.value.some(
+    (slot) =>
+      slot.index === originSlot && slot.taskKey === drag.taskKey,
+  );
+}
+
 function beginDrag(drag: ActiveDrag) {
   if (
-    (drag.kind === "task" &&
-      !tasks.value.some((task) => task.taskKey === drag.taskKey)) ||
+    (drag.kind === "task" && !taskDragSourceExists(drag)) ||
     (drag.kind === "slot" &&
       !slots.value.some(
         (slot) =>
@@ -217,8 +232,7 @@ watch(
       return;
     }
     if (
-      (drag.kind === "task" &&
-        !tasks.value.some((task) => task.taskKey === drag.taskKey)) ||
+      (drag.kind === "task" && !taskDragSourceExists(drag)) ||
       (drag.kind === "slot" &&
         !slots.value.some(
           (slot) =>

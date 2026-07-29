@@ -180,13 +180,50 @@ describe("TaskRail", () => {
     await row.trigger("dragend", { dataTransfer });
 
     expect(wrapper.emitted("dragstart")).toEqual([
-      [{ kind: "task", taskKey: PRIVATE_KEYS.running }],
+      [
+        {
+          kind: "task",
+          taskKey: PRIVATE_KEYS.running,
+          origin: { kind: "slot", slot: 0 },
+        },
+      ],
     ]);
     expect(wrapper.emitted("dragend")).toEqual([[]]);
     expect(dataTransfer.setData).toHaveBeenCalledWith(
       "application/x-codex-halo-drag",
       "task",
     );
+  });
+
+  it("等待队列拖拽显式记录 queue 来源且不写入 DOM", async () => {
+    const wrapper = mount(TaskRail, {
+      props: {
+        slots,
+        tasks: [running, waiting, completed, queued],
+        queue: [queued],
+        nowMs,
+        selectedSlot: null,
+      },
+    });
+    const dataTransfer = {
+      effectAllowed: "none",
+      setData: vi.fn(),
+    };
+
+    await wrapper.get("[data-queue-task] button").trigger("dragstart", {
+      dataTransfer,
+    });
+
+    expect(wrapper.emitted("dragstart")).toEqual([
+      [
+        {
+          kind: "task",
+          taskKey: PRIVATE_KEYS.queued,
+          origin: { kind: "queue" },
+        },
+      ],
+    ]);
+    expect(wrapper.html()).not.toContain(PRIVATE_KEYS.queued);
   });
 
   it("提供可访问的抽屉开关并让折叠内容持续存在于 DOM", async () => {

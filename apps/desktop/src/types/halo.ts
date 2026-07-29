@@ -69,8 +69,12 @@ export interface ManualBindInput {
   lock: boolean;
 }
 
+export type TaskDragOrigin =
+  | { kind: "queue" }
+  | { kind: "slot"; slot: number };
+
 export type ActiveDrag =
-  | { kind: "task"; taskKey: TaskKey }
+  | { kind: "task"; taskKey: TaskKey; origin: TaskDragOrigin }
   | { kind: "slot"; slot: number; taskKey: TaskKey };
 
 export interface UpdateEffectInput extends EffectProfile {
