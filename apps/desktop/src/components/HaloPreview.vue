@@ -109,7 +109,7 @@ function ringLabel(slot: RingSlot) {
   const confidence = slot.confidence
     ? CONFIDENCE_LABELS[slot.confidence]
     : "无可置信度";
-  const identity = slot.taskKey ? `任务 ${slot.taskKey}` : "无任务";
+  const identity = slot.taskKey ? "匿名任务已绑定" : "无任务";
 
   return `第 ${slot.index + 1} 圈${position}，${STATUS_LABELS[visualStatus(slot)]}，${identity}，来源 ${source}，${confidence}`;
 }
