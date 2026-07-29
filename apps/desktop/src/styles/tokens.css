@@ -1,0 +1,48 @@
+:root {
+  color-scheme: dark;
+
+  --halo-font-sans: "IBM Plex Sans Variable", "IBM Plex Sans", sans-serif;
+  --halo-font-mono: "JetBrains Mono Variable", "JetBrains Mono", monospace;
+
+  --halo-canvas: #070a0b;
+  --halo-canvas-raised: #0d1112;
+  --halo-glass: #111718;
+  --halo-glass-highlight: #263031;
+  --halo-metal-dark: #242a2b;
+  --halo-metal: #737a79;
+  --halo-metal-bright: #adb2af;
+  --halo-text: #e5e9e7;
+  --halo-text-muted: #899291;
+  --halo-focus: #8bc9c8;
+
+  --halo-running: #f1b94d;
+  --halo-waiting: #ed873b;
+  --halo-round-completed: #6fd393;
+  --halo-failed: #f45e57;
+  --halo-queued: #a491ce;
+  --halo-unknown: #63abc5;
+  --halo-idle: #354041;
+
+  --halo-running-glow: rgb(241 185 77 / 48%);
+  --halo-waiting-glow: rgb(237 135 59 / 42%);
+  --halo-round-completed-glow: rgb(111 211 147 / 38%);
+  --halo-failed-glow: rgb(244 94 87 / 48%);
+  --halo-queued-glow: rgb(164 145 206 / 30%);
+  --halo-unknown-glow: rgb(99 171 197 / 32%);
+  --halo-idle-glow: rgb(53 64 65 / 18%);
+  --halo-shadow: rgb(0 0 0 / 64%);
+  --halo-hairline: rgb(196 205 202 / 12%);
+  --halo-glass-sheen: rgb(218 231 226 / 8%);
+
+  --halo-preview-size: clamp(18rem, 58vw, 36rem);
+  --halo-ring-inner-size: 28%;
+  --halo-ring-width: clamp(0.38rem, 1.15vw, 0.72rem);
+  --halo-ring-gap: 6%;
+
+  --halo-motion-running: 1800ms;
+  --halo-motion-waiting: 2800ms;
+  --halo-motion-round-completed: 1800ms;
+  --halo-motion-failed: 1050ms;
+  --halo-motion-queued: 5600ms;
+  --halo-motion-unknown: 3400ms;
+}

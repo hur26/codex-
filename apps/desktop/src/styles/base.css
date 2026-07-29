@@ -1,0 +1,44 @@
+@import "./tokens.css";
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: var(--halo-canvas);
+  font-family: var(--halo-font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  color: var(--halo-text);
+  background:
+    radial-gradient(
+      circle at 50% 36%,
+      var(--halo-canvas-raised) 0,
+      var(--halo-canvas) 64%
+    );
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+::selection {
+  color: var(--halo-canvas);
+  background: var(--halo-focus);
+}
