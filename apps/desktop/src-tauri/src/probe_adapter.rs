@@ -72,6 +72,8 @@ pub struct ProbeAdapter {
     accepted_events: u64,
     ignored_events: u64,
     rejected_events: u64,
+    offline_episode: bool,
+    has_safety_rejections: bool,
 }
 
 impl ProbeAdapter {
@@ -82,32 +84,25 @@ impl ProbeAdapter {
             accepted_events: 0,
             ignored_events: 0,
             rejected_events: 0,
+            offline_episode: false,
+            has_safety_rejections: false,
         }
     }
 
     pub fn poll(&mut self) -> PollBatch {
         let Some(probe_dir) = self.probe_dir.clone() else {
-            return PollBatch {
-                signals: Vec::new(),
-                status: self.status(AdapterState::Offline),
-            };
+            return self.offline_batch();
         };
         if !probe_dir.is_dir() {
-            return PollBatch {
-                signals: Vec::new(),
-                status: self.status(AdapterState::Offline),
-            };
+            return self.offline_batch();
         }
 
         let entries = match fs::read_dir(&probe_dir) {
-            Ok(entries) => entries,
-            Err(_) => {
-                self.reject();
-                return PollBatch {
-                    signals: Vec::new(),
-                    status: self.status(AdapterState::Degraded),
-                };
+            Ok(entries) => {
+                self.offline_episode = false;
+                entries
             }
+            Err(_) => return self.offline_batch(),
         };
         let mut filenames = Vec::new();
         for entry in entries {
@@ -143,10 +138,10 @@ impl ProbeAdapter {
             }
         }
 
-        let state = if self.rejected_events == 0 {
-            AdapterState::Online
-        } else {
+        let state = if self.has_safety_rejections {
             AdapterState::Degraded
+        } else {
+            AdapterState::Online
         };
         PollBatch {
             signals,
@@ -156,6 +151,18 @@ impl ProbeAdapter {
 
     fn reject(&mut self) {
         self.rejected_events = self.rejected_events.saturating_add(1);
+        self.has_safety_rejections = true;
+    }
+
+    fn offline_batch(&mut self) -> PollBatch {
+        if !self.offline_episode {
+            self.rejected_events = self.rejected_events.saturating_add(1);
+            self.offline_episode = true;
+        }
+        PollBatch {
+            signals: Vec::new(),
+            status: self.status(AdapterState::Offline),
+        }
     }
 
     fn status(&self, state: AdapterState) -> AdapterStatus {
@@ -569,11 +576,33 @@ mod tests {
     fn missing_directory_is_offline_without_panicking_or_disclosing_the_path() {
         let directory = TestDir::new();
         let missing = directory.path().join("private-user-name").join("missing");
-        let batch = ProbeAdapter::new(Some(missing.clone())).poll();
+        let mut adapter = ProbeAdapter::new(Some(missing.clone()));
+        let first = adapter.poll();
 
-        assert!(batch.signals.is_empty());
-        assert_eq!(batch.status.state, AdapterState::Offline);
-        assert!(!batch
+        assert!(first.signals.is_empty());
+        assert_eq!(first.status.state, AdapterState::Offline);
+        assert_eq!(first.status.rejected_events, 1);
+        assert!(!first
+            .status
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains(missing.to_string_lossy().as_ref()));
+
+        let repeated = adapter.poll();
+        assert_eq!(repeated.status.state, AdapterState::Offline);
+        assert_eq!(repeated.status.rejected_events, 1);
+
+        fs::create_dir_all(&missing).expect("probe directory must recover");
+        let recovered = adapter.poll();
+        assert_eq!(recovered.status.state, AdapterState::Online);
+        assert_eq!(recovered.status.rejected_events, 1);
+
+        fs::remove_dir(&missing).expect("empty recovered directory must be removable");
+        let missing_again = adapter.poll();
+        assert_eq!(missing_again.status.state, AdapterState::Offline);
+        assert_eq!(missing_again.status.rejected_events, 2);
+        assert!(!missing_again
             .status
             .message
             .as_deref()
