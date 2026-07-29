@@ -146,6 +146,22 @@ impl Decoder {
                 continue;
             }
 
+            let version = self.buffer[2];
+            if version != PROTOCOL_MAJOR {
+                decoded.push(Err(ProtocolError::UnsupportedVersion { actual: version }));
+                self.resynchronize();
+                continue;
+            }
+
+            let message_type = match MessageType::try_from(self.buffer[3]) {
+                Ok(message_type) => message_type,
+                Err(error) => {
+                    decoded.push(Err(error));
+                    self.resynchronize();
+                    continue;
+                }
+            };
+
             let frame_length = HEADER_BYTES + payload_length + CRC_BYTES;
             if self.buffer.len() < frame_length {
                 return;
@@ -162,21 +178,6 @@ impl Decoder {
                 continue;
             }
 
-            let version = self.buffer[2];
-            if version != PROTOCOL_MAJOR {
-                decoded.push(Err(ProtocolError::UnsupportedVersion { actual: version }));
-                self.buffer.clear();
-                return;
-            }
-
-            let message_type = match MessageType::try_from(self.buffer[3]) {
-                Ok(message_type) => message_type,
-                Err(error) => {
-                    decoded.push(Err(error));
-                    self.buffer.clear();
-                    return;
-                }
-            };
             let sequence = u16::from_le_bytes([self.buffer[4], self.buffer[5]]);
             let payload = self.buffer[HEADER_BYTES..HEADER_BYTES + payload_length].to_vec();
             decoded.push(Ok(Frame::new(message_type, sequence, payload)));
@@ -275,6 +276,34 @@ mod tests {
         assert_eq!(
             decoder.push(&unknown_message),
             vec![Err(ProtocolError::UnknownMessageType { actual: 0xff })]
+        );
+    }
+
+    #[test]
+    fn recovers_from_an_invalid_header_before_waiting_for_its_declared_payload() {
+        let mut invalid_header = decode_hex("434802ff00000002");
+        invalid_header.extend(decode_hex("43480120020000006cae"));
+        let mut decoder = Decoder::default();
+
+        assert_eq!(
+            decoder.push(&invalid_header),
+            vec![
+                Err(ProtocolError::UnsupportedVersion { actual: 2 }),
+                Ok(Frame::new(MessageType::Heartbeat, 2, vec![]))
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_overlapping_magic_when_rejecting_an_invalid_header() {
+        let mut decoder = Decoder::default();
+
+        assert_eq!(
+            decoder.push(&decode_hex("434843480120020000006cae")),
+            vec![
+                Err(ProtocolError::UnsupportedVersion { actual: 0x43 }),
+                Ok(Frame::new(MessageType::Heartbeat, 2, vec![]))
+            ]
         );
     }
 
