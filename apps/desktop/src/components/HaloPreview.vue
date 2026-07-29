@@ -12,11 +12,13 @@ import type {
 const props = withDefaults(
   defineProps<{
     slots: RingSlot[];
+    globalBrightness?: number;
     selectedSlot?: number | null;
     dragActive?: boolean;
     dragKind?: ActiveDrag["kind"] | null;
   }>(),
   {
+    globalBrightness: 100,
     selectedSlot: null,
     dragActive: false,
     dragKind: null,
@@ -213,7 +215,16 @@ watch(
 function ringStyle(slot: RingSlot): CSSProperties {
   const speed = Math.max(25, Math.min(300, slot.effect.speedPercent));
   const duration = MOTION_BASE_MS[visualStatus(slot)];
-  const opacity = 0.24 + Math.max(0, Math.min(100, slot.effect.brightness)) * 0.0076;
+  const globalBrightness = Math.max(
+    0,
+    Math.min(100, props.globalBrightness),
+  );
+  const ringBrightness = Math.max(
+    0,
+    Math.min(100, slot.effect.brightness),
+  );
+  const effectiveBrightness = (globalBrightness * ringBrightness) / 100;
+  const opacity = effectiveBrightness / 100;
   const tail = Math.max(1, Math.min(100, slot.effect.tailPercent));
 
   return {
@@ -221,7 +232,7 @@ function ringStyle(slot: RingSlot): CSSProperties {
     "--ring-tail-start": `${100 - tail}%`,
     "--ring-tail-soft-start": `${100 - tail * 0.58}%`,
     "--ring-opacity": opacity.toFixed(3),
-    "--ring-opacity-low": Math.max(0.16, opacity * 0.48).toFixed(3),
+    "--ring-opacity-low": (opacity * 0.48).toFixed(3),
     "--ring-motion-duration": `${Math.round((duration * 100) / speed)}ms`,
     "--ring-motion-direction":
       slot.effect.direction === "counterClockwise" ? "reverse" : "normal",
@@ -561,7 +572,7 @@ function ringStyle(slot: RingSlot): CSSProperties {
     var(--ring-color),
     var(--ring-color)
   );
-  opacity: 0.3;
+  opacity: var(--ring-opacity);
 }
 
 .slot-index,

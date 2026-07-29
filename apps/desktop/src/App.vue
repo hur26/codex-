@@ -4,6 +4,7 @@ import ActivityStrip from "./components/ActivityStrip.vue";
 import BindingControls from "./components/BindingControls.vue";
 import CentralDisplay from "./components/CentralDisplay.vue";
 import CrownControl from "./components/CrownControl.vue";
+import EffectEditor from "./components/EffectEditor.vue";
 import HaloPreview from "./components/HaloPreview.vue";
 import TaskRail from "./components/TaskRail.vue";
 import { createHaloStore } from "./stores/haloStore";
@@ -13,6 +14,7 @@ import type {
   DisplayMode,
   EffectProfile,
   RingSlot,
+  UpdateEffectInput,
 } from "./types/halo";
 
 const store = createHaloStore();
@@ -22,7 +24,12 @@ const displayMode = ref<DisplayMode>("ambient");
 const renderedAtMs = ref(Date.now());
 const activeDrag = ref<ActiveDrag | null>(null);
 const bindingCommandPending = ref(false);
+const effectCommandPending = ref(false);
 let activityClock: number | null = null;
+let effectQueueRunning = false;
+let effectQueueMounted = true;
+let pendingGlobalBrightness: number | null = null;
+const pendingEffects = new Map<number, UpdateEffectInput>();
 
 const ADAPTER_LABELS: Record<AdapterState, string> = {
   online: "ONLINE",
@@ -201,7 +208,57 @@ function updateDisplayMode(mode: DisplayMode) {
   displayMode.value = mode;
 }
 
+function setGlobalBrightness(value: number) {
+  pendingGlobalBrightness = value;
+  void drainEffectQueue();
+}
+
+function updateEffect(input: UpdateEffectInput) {
+  pendingEffects.set(input.slot, { ...input });
+  void drainEffectQueue();
+}
+
+async function drainEffectQueue() {
+  if (effectQueueRunning || !effectQueueMounted) {
+    return;
+  }
+  effectQueueRunning = true;
+  effectCommandPending.value = true;
+  try {
+    while (
+      effectQueueMounted &&
+      (pendingGlobalBrightness !== null || pendingEffects.size > 0)
+    ) {
+      if (pendingGlobalBrightness !== null) {
+        const value = pendingGlobalBrightness;
+        pendingGlobalBrightness = null;
+        await store.setGlobalBrightness(value);
+        continue;
+      }
+
+      const next = pendingEffects.entries().next().value as
+        | [number, UpdateEffectInput]
+        | undefined;
+      if (!next) {
+        continue;
+      }
+      pendingEffects.delete(next[0]);
+      await store.updateEffect(next[1]);
+    }
+  } finally {
+    effectQueueRunning = false;
+    effectCommandPending.value = false;
+    if (
+      effectQueueMounted &&
+      (pendingGlobalBrightness !== null || pendingEffects.size > 0)
+    ) {
+      void drainEffectQueue();
+    }
+  }
+}
+
 onMounted(() => {
+  effectQueueMounted = true;
   renderedAtMs.value = Date.now();
   activityClock = window.setInterval(() => {
     renderedAtMs.value = Date.now();
@@ -214,6 +271,9 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  effectQueueMounted = false;
+  pendingGlobalBrightness = null;
+  pendingEffects.clear();
   clearActiveDrag();
   window.removeEventListener("blur", clearActiveDrag);
   window.removeEventListener("keydown", handleGlobalKeydown);
@@ -337,6 +397,9 @@ watch(
 
           <HaloPreview
             :slots="slots"
+            :global-brightness="
+              store.state.snapshot?.globalBrightness ?? 100
+            "
             :selected-slot="selectedSlot"
             :drag-active="activeDrag !== null"
             :drag-kind="activeDrag?.kind ?? null"
@@ -368,6 +431,16 @@ watch(
           :loading="store.state.loading || bindingCommandPending"
           @bind="manualBind"
           @toggle-lock="toggleLock"
+        />
+
+        <EffectEditor
+          :global-brightness="
+            store.state.snapshot?.globalBrightness ?? 100
+          "
+          :selected-slot="selectedSlotRecord"
+          :pending="effectCommandPending"
+          @set-global-brightness="setGlobalBrightness"
+          @update-effect="updateEffect"
         />
 
         <footer class="device-caption">
