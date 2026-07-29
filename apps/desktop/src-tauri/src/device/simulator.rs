@@ -38,8 +38,13 @@ pub enum Fault {
 
 struct PendingResponse {
     bytes: Vec<u8>,
-    sequence: u16,
-    source_message_type: MessageType,
+    fault: Option<ResponseFault>,
+}
+
+#[derive(Clone, Copy)]
+enum ResponseFault {
+    Timeout,
+    CorruptCrc,
 }
 
 #[derive(Default)]
@@ -61,7 +66,10 @@ impl SimulatedTransport {
         self.faults.len()
     }
 
-    pub fn inject_knob(&mut self, event: KnobEvent) {
+    pub fn inject_knob(&mut self, event: KnobEvent) -> Result<(), TransportError> {
+        if event == KnobEvent::Rotate(0) {
+            return Err(TransportError::InvalidKnobDelta);
+        }
         let sequence = self.next_knob_sequence;
         self.next_knob_sequence = self.next_knob_sequence.wrapping_add(1);
         let payload = match event {
@@ -69,11 +77,7 @@ impl SimulatedTransport {
             KnobEvent::ShortPress => vec![0x02, 0],
             KnobEvent::LongPress => vec![0x03, 0],
         };
-        self.queue_response(
-            Frame::new(MessageType::KnobEvent, sequence, payload),
-            MessageType::KnobEvent,
-        )
-        .expect("fixed knob payload always fits the protocol frame");
+        self.queue_response(Frame::new(MessageType::KnobEvent, sequence, payload), None)
     }
 
     pub fn applied_snapshot(&self) -> Option<&DeviceSnapshot> {
@@ -81,18 +85,15 @@ impl SimulatedTransport {
     }
 
     fn process_frame(&mut self, frame: Frame) -> Result<(), TransportError> {
-        let expects_response =
-            frame.message_type != MessageType::Heartbeat || !frame.payload.is_empty();
-        if expects_response && matches!(self.faults.front(), Some(Fault::NackOnce(_))) {
-            return self.queue_response(
-                Frame::new(
-                    MessageType::Ack,
-                    frame.sequence,
-                    vec![frame.message_type as u8],
-                ),
-                frame.message_type,
-            );
+        if frame.message_type == MessageType::Heartbeat && frame.payload.is_empty() {
+            return Ok(());
         }
+        let response_fault = match self.faults.pop_front() {
+            Some(Fault::NackOnce(reason)) => return self.queue_nack(&frame, reason, None),
+            Some(Fault::TimeoutOnce) => Some(ResponseFault::Timeout),
+            Some(Fault::CorruptCrcOnce) => Some(ResponseFault::CorruptCrc),
+            None => None,
+        };
 
         match frame.message_type {
             MessageType::Hello if frame.payload == [0] => self.queue_response(
@@ -101,95 +102,104 @@ impl SimulatedTransport {
                     frame.sequence,
                     CAPABILITIES_PAYLOAD.to_vec(),
                 ),
-                MessageType::Hello,
+                response_fault,
             ),
-            MessageType::Hello => self.queue_nack(&frame, NackReason::MalformedPayload),
+            MessageType::Hello => {
+                self.queue_nack(&frame, NackReason::MalformedPayload, response_fault)
+            }
             MessageType::FullSnapshot => match parse_snapshot(&frame.payload) {
                 Some(snapshot) => {
                     self.applied_snapshot = Some(snapshot);
-                    self.queue_ack(&frame)
+                    self.queue_ack(&frame, response_fault)
                 }
-                None => self.queue_nack(&frame, NackReason::MalformedPayload),
+                None => self.queue_nack(&frame, NackReason::MalformedPayload, response_fault),
             },
             MessageType::RingUpdate => match parse_ring(&frame.payload) {
                 Some(ring) => {
                     if let Some(snapshot) = self.applied_snapshot.as_mut() {
                         let index = usize::from(ring.index);
                         snapshot.rings[index] = ring;
-                        self.queue_ack(&frame)
+                        self.queue_ack(&frame, response_fault)
                     } else {
-                        self.queue_nack(&frame, NackReason::InvalidState)
+                        self.queue_nack(&frame, NackReason::InvalidState, response_fault)
                     }
                 }
-                None => self.queue_nack(&frame, NackReason::MalformedPayload),
+                None => self.queue_nack(&frame, NackReason::MalformedPayload, response_fault),
             },
             MessageType::DisplayMode => match parse_display(&frame.payload) {
                 Some((display_mode, selected_ring)) => {
                     if let Some(snapshot) = self.applied_snapshot.as_mut() {
                         snapshot.display_mode = display_mode;
                         snapshot.selected_ring = selected_ring;
-                        self.queue_ack(&frame)
+                        self.queue_ack(&frame, response_fault)
                     } else {
-                        self.queue_nack(&frame, NackReason::InvalidState)
+                        self.queue_nack(&frame, NackReason::InvalidState, response_fault)
                     }
                 }
-                None => self.queue_nack(&frame, NackReason::MalformedPayload),
+                None => self.queue_nack(&frame, NackReason::MalformedPayload, response_fault),
             },
             MessageType::Brightness => match frame.payload.as_slice() {
                 [brightness] if *brightness <= 100 => {
                     if let Some(snapshot) = self.applied_snapshot.as_mut() {
                         snapshot.global_brightness = *brightness;
-                        self.queue_ack(&frame)
+                        self.queue_ack(&frame, response_fault)
                     } else {
-                        self.queue_nack(&frame, NackReason::InvalidState)
+                        self.queue_nack(&frame, NackReason::InvalidState, response_fault)
                     }
                 }
-                _ => self.queue_nack(&frame, NackReason::MalformedPayload),
+                _ => self.queue_nack(&frame, NackReason::MalformedPayload, response_fault),
             },
-            MessageType::Heartbeat if frame.payload.is_empty() => Ok(()),
-            MessageType::Heartbeat => self.queue_nack(&frame, NackReason::MalformedPayload),
+            MessageType::Heartbeat => {
+                self.queue_nack(&frame, NackReason::MalformedPayload, response_fault)
+            }
             MessageType::Capabilities
             | MessageType::Ack
             | MessageType::Nack
             | MessageType::KnobEvent
-            | MessageType::Diagnostics => self.queue_nack(&frame, NackReason::UnsupportedMessage),
+            | MessageType::Diagnostics => {
+                self.queue_nack(&frame, NackReason::UnsupportedMessage, response_fault)
+            }
         }
     }
 
-    fn queue_ack(&mut self, request: &Frame) -> Result<(), TransportError> {
+    fn queue_ack(
+        &mut self,
+        request: &Frame,
+        fault: Option<ResponseFault>,
+    ) -> Result<(), TransportError> {
         self.queue_response(
             Frame::new(
                 MessageType::Ack,
                 request.sequence,
                 vec![request.message_type as u8],
             ),
-            request.message_type,
+            fault,
         )
     }
 
-    fn queue_nack(&mut self, request: &Frame, reason: NackReason) -> Result<(), TransportError> {
+    fn queue_nack(
+        &mut self,
+        request: &Frame,
+        reason: NackReason,
+        fault: Option<ResponseFault>,
+    ) -> Result<(), TransportError> {
         self.queue_response(
             Frame::new(
                 MessageType::Nack,
                 request.sequence,
                 vec![request.message_type as u8, reason as u8],
             ),
-            request.message_type,
+            fault,
         )
     }
 
     fn queue_response(
         &mut self,
         response: Frame,
-        source_message_type: MessageType,
+        fault: Option<ResponseFault>,
     ) -> Result<(), TransportError> {
-        let sequence = response.sequence;
         let bytes = protocol::encode(&response)?;
-        self.responses.push_back(PendingResponse {
-            bytes,
-            sequence,
-            source_message_type,
-        });
+        self.responses.push_back(PendingResponse { bytes, fault });
         Ok(())
     }
 }
@@ -217,10 +227,17 @@ impl DeviceTransport for SimulatedTransport {
         if !self.connected {
             return Err(TransportError::Disconnected);
         }
+        let mut first_error = None;
         for decoded in self.decoder.push(bytes) {
-            self.process_frame(decoded?)?;
+            let result = match decoded {
+                Ok(frame) => self.process_frame(frame),
+                Err(error) => Err(TransportError::Protocol(error)),
+            };
+            if first_error.is_none() {
+                first_error = result.err();
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     fn read(&mut self) -> Result<Vec<u8>, TransportError> {
@@ -231,15 +248,9 @@ impl DeviceTransport for SimulatedTransport {
             return Ok(Vec::new());
         };
 
-        match self.faults.pop_front() {
-            Some(Fault::TimeoutOnce) => Err(TransportError::Timeout),
-            Some(Fault::NackOnce(reason)) => protocol::encode(&Frame::new(
-                MessageType::Nack,
-                response.sequence,
-                vec![response.source_message_type as u8, reason as u8],
-            ))
-            .map_err(TransportError::from),
-            Some(Fault::CorruptCrcOnce) => {
+        match response.fault {
+            Some(ResponseFault::Timeout) => Err(TransportError::Timeout),
+            Some(ResponseFault::CorruptCrc) => {
                 if let Some(crc_byte) = response.bytes.last_mut() {
                     *crc_byte ^= 0xff;
                 }
@@ -618,6 +629,48 @@ mod tests {
     }
 
     #[test]
+    fn injected_nack_is_bound_to_exactly_one_queued_write() {
+        let mut simulator = SimulatedTransport::default();
+        connect(&mut simulator);
+        simulator.script(Fault::NackOnce(NackReason::Busy));
+        let rejected = fixture_device_snapshot();
+        let mut accepted = rejected.clone();
+        accepted.revision = 43;
+        accepted.global_brightness = 55;
+
+        write_frame(
+            &mut simulator,
+            Frame::new(
+                MessageType::FullSnapshot,
+                7,
+                rejected.encode_payload().unwrap(),
+            ),
+        );
+        write_frame(
+            &mut simulator,
+            Frame::new(
+                MessageType::FullSnapshot,
+                8,
+                accepted.encode_payload().unwrap(),
+            ),
+        );
+
+        assert_eq!(
+            decode_one(&simulator.read().unwrap()),
+            Frame::new(
+                MessageType::Nack,
+                7,
+                vec![MessageType::FullSnapshot as u8, NackReason::Busy as u8],
+            )
+        );
+        assert_eq!(
+            decode_one(&simulator.read().unwrap()),
+            Frame::new(MessageType::Ack, 8, vec![MessageType::FullSnapshot as u8])
+        );
+        assert_eq!(simulator.applied_snapshot(), Some(&accepted));
+    }
+
+    #[test]
     fn simulator_uses_the_streaming_decoder_for_fragmented_writes() {
         let mut simulator = SimulatedTransport::default();
         connect(&mut simulator);
@@ -634,13 +687,35 @@ mod tests {
     }
 
     #[test]
+    fn decoder_errors_do_not_drop_later_recovered_frames_from_the_same_write() {
+        let mut simulator = SimulatedTransport::default();
+        connect(&mut simulator);
+        let mut bytes = protocol::encode(&Frame::new(MessageType::Heartbeat, 1, vec![])).unwrap();
+        *bytes.last_mut().unwrap() ^= 0xff;
+        bytes.extend(protocol::encode(&Frame::new(MessageType::Hello, 2, vec![0])).unwrap());
+
+        assert_eq!(
+            simulator.write(&bytes),
+            Err(TransportError::Protocol(ProtocolError::CrcMismatch))
+        );
+        assert_eq!(
+            decode_one(&simulator.read().unwrap()),
+            Frame::new(
+                MessageType::Capabilities,
+                2,
+                vec![0, 0, 1, 0, 4, 0x03, 0x00, 0x00, 0x02],
+            )
+        );
+    }
+
+    #[test]
     fn injected_knob_events_use_protocol_payload_values_and_sequences() {
         let mut simulator = SimulatedTransport::default();
         connect(&mut simulator);
 
-        simulator.inject_knob(KnobEvent::Rotate(-1));
-        simulator.inject_knob(KnobEvent::ShortPress);
-        simulator.inject_knob(KnobEvent::LongPress);
+        simulator.inject_knob(KnobEvent::Rotate(-1)).unwrap();
+        simulator.inject_knob(KnobEvent::ShortPress).unwrap();
+        simulator.inject_knob(KnobEvent::LongPress).unwrap();
 
         let expected = [(0, vec![1, 0xff]), (1, vec![2, 0]), (2, vec![3, 0])];
         for (sequence, payload) in expected {
@@ -649,6 +724,24 @@ mod tests {
                 Frame::new(MessageType::KnobEvent, sequence, payload)
             );
         }
+    }
+
+    #[test]
+    fn zero_delta_knob_rotation_is_rejected_without_queueing_or_advancing_sequence() {
+        let mut simulator = SimulatedTransport::default();
+        connect(&mut simulator);
+
+        assert_eq!(
+            simulator.inject_knob(KnobEvent::Rotate(0)),
+            Err(TransportError::InvalidKnobDelta)
+        );
+        assert!(simulator.read().unwrap().is_empty());
+
+        simulator.inject_knob(KnobEvent::Rotate(1)).unwrap();
+        assert_eq!(
+            decode_one(&simulator.read().unwrap()),
+            Frame::new(MessageType::KnobEvent, 0, vec![1, 1])
+        );
     }
 
     #[test]

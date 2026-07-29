@@ -31,6 +31,7 @@ pub enum TransportError {
     EndpointNotFound,
     Disconnected,
     Timeout,
+    InvalidKnobDelta,
     Protocol(ProtocolError),
 }
 
