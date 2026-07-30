@@ -1,4 +1,5 @@
 use crate::app_state::{AppState, ROUND_COMPLETE_HOLD_MS};
+use crate::device::manager::DeviceStatus;
 use crate::domain::effects::{Direction, EffectParameter, EffectProfile, EffectValidationError};
 use crate::domain::engine::EngineError;
 use crate::domain::model::{
@@ -129,6 +130,11 @@ pub fn get_adapter_status(
 }
 
 #[tauri::command]
+pub fn get_device_status(state: tauri::State<'_, AppState>) -> Result<DeviceStatus, CommandError> {
+    get_device_status_inner(&state)
+}
+
+#[tauri::command]
 pub fn simulate_signal(
     state: tauri::State<'_, AppState>,
     input: Option<Value>,
@@ -203,6 +209,14 @@ fn get_snapshot_inner(state: &AppState) -> Result<HaloSnapshot, CommandError> {
 fn get_adapter_status_inner(state: &AppState) -> Result<AdapterStatus, CommandError> {
     state
         .adapter_status
+        .lock()
+        .map(|status| status.clone())
+        .map_err(|_| CommandError::StateUnavailable)
+}
+
+fn get_device_status_inner(state: &AppState) -> Result<DeviceStatus, CommandError> {
+    state
+        .device_status
         .lock()
         .map(|status| status.clone())
         .map_err(|_| CommandError::StateUnavailable)
@@ -460,6 +474,8 @@ fn validated_u8(
 mod tests {
     use super::*;
     use crate::app_state::AppState;
+    use crate::device::manager::DeviceConnectionState;
+    use crate::device::transport::TransportKind;
     use crate::domain::effects::{Direction, EffectParameter, EffectValidationError};
     use crate::domain::model::{Confidence, DeviceMode, SignalSource, TaskStatus};
 
@@ -570,6 +586,28 @@ mod tests {
                 "acceptedEvents": 0,
                 "ignoredEvents": 0,
                 "rejectedEvents": 0
+            })
+        );
+    }
+
+    #[test]
+    fn default_device_status_is_virtual_and_serializable_without_identity() {
+        let status = get_device_status_inner(&state()).expect("fresh status must be readable");
+
+        assert_eq!(status.state, DeviceConnectionState::Virtual);
+        assert_eq!(status.transport, TransportKind::Simulator);
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(!json.contains("taskKey"));
+        assert!(!json.contains("serialNumber"));
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!({
+                "revision": 0,
+                "state": "virtual",
+                "transport": "simulator",
+                "message": null,
+                "firmwareVersion": null,
+                "retryCount": 0
             })
         );
     }

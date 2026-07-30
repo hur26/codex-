@@ -5,6 +5,7 @@ pub mod domain;
 pub mod probe_adapter;
 
 use crate::probe_adapter::resolve_probe_dir;
+use app_state::DeviceTransportMode;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -18,11 +19,16 @@ pub fn run() {
                 resolve_probe_dir(None, environment_override.as_deref(), home_dir.as_deref());
             app.state::<app_state::AppState>()
                 .start_probe_worker(app.handle().clone(), probe_dir);
+            app.state::<app_state::AppState>().start_device_worker(
+                app.handle().clone(),
+                DeviceTransportMode::from_environment(),
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot,
             commands::get_adapter_status,
+            commands::get_device_status,
             commands::simulate_signal,
             commands::manual_bind,
             commands::toggle_lock,
@@ -37,9 +43,7 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
-            app_handle
-                .state::<app_state::AppState>()
-                .stop_probe_worker();
+            app_handle.state::<app_state::AppState>().stop_workers();
         }
     });
 }

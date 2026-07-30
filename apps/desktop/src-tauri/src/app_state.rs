@@ -1,21 +1,83 @@
+use crate::device::manager::{DeviceConnectionState, DeviceManager, DeviceStatus};
+use crate::device::serial::SerialTransport;
+use crate::device::simulator::SimulatedTransport;
+use crate::device::transport::{DeviceTransport, TransportKind};
 use crate::domain::engine::HaloEngine;
-use crate::domain::model::{HaloSnapshot, TaskSignal};
+use crate::domain::model::{HaloSnapshot, PresentationIntent, TaskSignal};
 use crate::probe_adapter::{AdapterState, AdapterStatus, ProbeAdapter};
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Runtime};
 
 pub const ROUND_COMPLETE_HOLD_MS: u64 = 300_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+struct DeviceWorkerTimer {
+    origin: Instant,
+}
+
+impl DeviceWorkerTimer {
+    fn start() -> Self {
+        Self::starting_at(Instant::now())
+    }
+
+    fn starting_at(origin: Instant) -> Self {
+        Self { origin }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.elapsed_ms_at(Instant::now())
+    }
+
+    fn elapsed_ms_at(&self, now: Instant) -> u64 {
+        duration_millis_u64(now.saturating_duration_since(self.origin))
+    }
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeviceTransportMode {
+    #[default]
+    Simulator,
+    Serial,
+}
+
+impl DeviceTransportMode {
+    pub fn from_environment() -> Self {
+        Self::from_override(std::env::var_os("CODEX_HALO_DEVICE_TRANSPORT").as_deref())
+    }
+
+    fn from_override(value: Option<&OsStr>) -> Self {
+        match value {
+            Some(value) if value == OsStr::new("serial") => Self::Serial,
+            _ => Self::Simulator,
+        }
+    }
+
+    fn transport_kind(self) -> TransportKind {
+        match self {
+            Self::Simulator => TransportKind::Simulator,
+            Self::Serial => TransportKind::Serial,
+        }
+    }
+}
 
 pub struct AppState {
     pub(crate) engine: Arc<Mutex<HaloEngine>>,
     pub(crate) adapter_status: Arc<Mutex<AdapterStatus>>,
+    pub(crate) device_status: Arc<Mutex<DeviceStatus>>,
     worker_stop: Arc<AtomicBool>,
     worker_handle: Mutex<Option<JoinHandle<()>>>,
+    device_worker_stop: Arc<AtomicBool>,
+    device_worker_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Default for AppState {
@@ -23,8 +85,11 @@ impl Default for AppState {
         Self {
             engine: Arc::new(Mutex::new(HaloEngine::new(ROUND_COMPLETE_HOLD_MS))),
             adapter_status: Arc::new(Mutex::new(AdapterStatus::offline())),
+            device_status: Arc::new(Mutex::new(safe_device_status())),
             worker_stop: Arc::new(AtomicBool::new(false)),
             worker_handle: Mutex::new(None),
+            device_worker_stop: Arc::new(AtomicBool::new(false)),
+            device_worker_handle: Mutex::new(None),
         }
     }
 }
@@ -75,11 +140,83 @@ impl AppState {
             let _ = handle.join();
         }
     }
+
+    pub fn start_device_worker<R: Runtime>(
+        &self,
+        app_handle: AppHandle<R>,
+        mode: DeviceTransportMode,
+    ) {
+        let Ok(mut worker_handle) = self.device_worker_handle.lock() else {
+            return;
+        };
+        if worker_handle.is_some() {
+            return;
+        }
+
+        self.device_worker_stop.store(false, Ordering::Release);
+        let engine = Arc::clone(&self.engine);
+        let device_status = Arc::clone(&self.device_status);
+        let stop = Arc::clone(&self.device_worker_stop);
+        let worker_app_handle = app_handle.clone();
+        match thread::Builder::new()
+            .name("codex-halo-device".to_owned())
+            .spawn(move || {
+                run_device_worker(worker_app_handle, engine, device_status, stop, mode);
+            }) {
+            Ok(handle) => *worker_handle = Some(handle),
+            Err(_) => {
+                let status = device_worker_error_status(mode, "Device worker could not start");
+                publish_device_status(&self.device_status, status, |status| {
+                    let _ = app_handle.emit("halo://device-status", status);
+                });
+            }
+        }
+    }
+
+    pub fn stop_device_worker(&self) {
+        self.device_worker_stop.store(true, Ordering::Release);
+        let handle = self
+            .device_worker_handle
+            .lock()
+            .ok()
+            .and_then(|mut handle| handle.take());
+        if let Some(handle) = handle {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+    }
+
+    pub fn stop_workers(&self) {
+        self.stop_probe_worker();
+        self.stop_device_worker();
+    }
 }
 
 impl Drop for AppState {
     fn drop(&mut self) {
-        self.stop_probe_worker();
+        self.stop_workers();
+    }
+}
+
+fn safe_device_status() -> DeviceStatus {
+    DeviceStatus {
+        revision: 0,
+        state: DeviceConnectionState::Virtual,
+        transport: TransportKind::Simulator,
+        message: None,
+        firmware_version: None,
+        retry_count: 0,
+    }
+}
+
+fn device_worker_error_status(mode: DeviceTransportMode, message: &str) -> DeviceStatus {
+    DeviceStatus {
+        revision: 0,
+        state: DeviceConnectionState::Error,
+        transport: mode.transport_kind(),
+        message: Some(message.to_owned()),
+        firmware_version: None,
+        retry_count: 0,
     }
 }
 
@@ -110,6 +247,78 @@ fn run_probe_worker<R: Runtime>(
     }
 }
 
+fn run_device_worker<R: Runtime>(
+    app_handle: AppHandle<R>,
+    engine: Arc<Mutex<HaloEngine>>,
+    device_status: Arc<Mutex<DeviceStatus>>,
+    stop: Arc<AtomicBool>,
+    mode: DeviceTransportMode,
+) {
+    match mode {
+        DeviceTransportMode::Simulator => run_device_manager(
+            app_handle,
+            engine,
+            device_status,
+            stop,
+            DeviceManager::new(SimulatedTransport::default()),
+        ),
+        DeviceTransportMode::Serial => run_device_manager(
+            app_handle,
+            engine,
+            device_status,
+            stop,
+            DeviceManager::new(SerialTransport::default()),
+        ),
+    }
+}
+
+fn run_device_manager<R: Runtime, T: DeviceTransport>(
+    app_handle: AppHandle<R>,
+    engine: Arc<Mutex<HaloEngine>>,
+    device_status: Arc<Mutex<DeviceStatus>>,
+    stop: Arc<AtomicBool>,
+    mut manager: DeviceManager<T>,
+) {
+    let timer = DeviceWorkerTimer::start();
+    while !stop.load(Ordering::Acquire) {
+        let snapshot = match engine.lock() {
+            Ok(engine) => engine.snapshot(),
+            Err(_) => {
+                let status = DeviceStatus {
+                    revision: 0,
+                    state: DeviceConnectionState::Error,
+                    transport: manager.status().transport,
+                    message: Some("Virtual device state is unavailable".to_owned()),
+                    firmware_version: None,
+                    retry_count: manager.status().retry_count,
+                };
+                publish_device_status(&device_status, status, |status| {
+                    let _ = app_handle.emit("halo://device-status", status);
+                });
+                park_device_worker(&stop);
+                continue;
+            }
+        };
+
+        let result = manager.step(timer.elapsed_ms(), &snapshot);
+        publish_device_status(&device_status, manager.status().clone(), |status| {
+            let _ = app_handle.emit("halo://device-status", status);
+        });
+
+        if let Some(snapshot) = apply_device_intents(&engine, result.intents) {
+            let _ = app_handle.emit("halo://snapshot", snapshot);
+        }
+
+        park_device_worker(&stop);
+    }
+}
+
+fn park_device_worker(stop: &AtomicBool) {
+    if !stop.load(Ordering::Acquire) {
+        thread::park_timeout(DEVICE_POLL_INTERVAL);
+    }
+}
+
 fn publish_adapter_status(
     adapter_status: &Mutex<AdapterStatus>,
     mut observed: AdapterStatus,
@@ -127,6 +336,51 @@ fn publish_adapter_status(
         observed
     };
     emit(changed);
+}
+
+fn publish_device_status(
+    device_status: &Mutex<DeviceStatus>,
+    mut observed: DeviceStatus,
+    emit: impl FnOnce(DeviceStatus),
+) {
+    let changed = {
+        let Ok(mut current) = device_status.lock() else {
+            return;
+        };
+        if same_device_status_payload(&current, &observed) {
+            return;
+        }
+        observed.revision = current.revision.saturating_add(1);
+        *current = observed.clone();
+        observed
+    };
+    emit(changed);
+}
+
+fn same_device_status_payload(left: &DeviceStatus, right: &DeviceStatus) -> bool {
+    left.state == right.state
+        && left.transport == right.transport
+        && left.message == right.message
+        && left.firmware_version == right.firmware_version
+        && left.retry_count == right.retry_count
+}
+
+fn apply_device_intents(
+    engine: &Mutex<HaloEngine>,
+    intents: Vec<PresentationIntent>,
+) -> Option<HaloSnapshot> {
+    if intents.is_empty() {
+        return None;
+    }
+    let Ok(mut engine) = engine.lock() else {
+        return None;
+    };
+    let before_revision = engine.snapshot().revision;
+    for intent in intents {
+        engine.apply_presentation_intent(intent);
+    }
+    let snapshot = engine.snapshot();
+    (snapshot.revision != before_revision).then_some(snapshot)
 }
 
 fn apply_probe_batch(
@@ -157,7 +411,15 @@ fn unix_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::model::{Confidence, NormalizedState, SignalSource, TaskKey, TaskStatus};
+    use crate::device::manager::{DeviceConnectionState, DeviceStatus};
+    use crate::device::transport::TransportKind;
+    use crate::domain::model::{
+        Confidence, DisplayMode, NormalizedState, PresentationIntent, SignalSource, TaskKey,
+        TaskStatus,
+    };
+    use std::ffi::OsStr;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
 
     fn signal(received_at_ms: u64) -> TaskSignal {
         TaskSignal {
@@ -238,5 +500,121 @@ mod tests {
         assert_eq!(emitted[0].revision, 1);
         assert_eq!(emitted[1].revision, 2);
         assert_eq!(shared.lock().unwrap().revision, 2);
+    }
+
+    #[test]
+    fn device_transport_mode_defaults_to_simulator_and_requires_an_exact_serial_override() {
+        assert_eq!(
+            DeviceTransportMode::default(),
+            DeviceTransportMode::Simulator
+        );
+        assert_eq!(
+            DeviceTransportMode::from_override(Some(OsStr::new("serial"))),
+            DeviceTransportMode::Serial
+        );
+        for value in [None, Some(OsStr::new("Serial")), Some(OsStr::new("usb"))] {
+            assert_eq!(
+                DeviceTransportMode::from_override(value),
+                DeviceTransportMode::Simulator
+            );
+        }
+    }
+
+    #[test]
+    fn device_timer_progresses_when_the_wall_clock_moves_backward() {
+        let origin = Instant::now();
+        let timer = DeviceWorkerTimer::starting_at(origin);
+        let wall_clock_before_ms = 10_000_u64;
+        let wall_clock_after_ms = 1_000_u64;
+
+        let first_step_ms = timer.elapsed_ms_at(origin + Duration::from_millis(10));
+        let retry_step_ms = timer.elapsed_ms_at(origin + Duration::from_millis(260));
+
+        assert!(wall_clock_after_ms < wall_clock_before_ms);
+        assert_eq!(first_step_ms, 10);
+        assert_eq!(retry_step_ms, 260);
+        assert_eq!(retry_step_ms - first_step_ms, 250);
+        assert_eq!(duration_millis_u64(Duration::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn knob_intents_mutate_the_engine_and_return_the_changed_snapshot() {
+        let engine = Mutex::new(HaloEngine::new(ROUND_COMPLETE_HOLD_MS));
+
+        let snapshot = apply_device_intents(&engine, vec![PresentationIntent::ShortPress])
+            .expect("a presentation change must produce a snapshot");
+
+        assert_eq!(snapshot.display_mode, DisplayMode::Overview);
+        assert_eq!(engine.lock().unwrap().snapshot(), snapshot);
+    }
+
+    #[test]
+    fn device_status_is_emitted_only_for_semantic_changes_and_outside_the_lock() {
+        let shared = Mutex::new(DeviceStatus {
+            revision: 0,
+            state: DeviceConnectionState::Virtual,
+            transport: TransportKind::Simulator,
+            message: None,
+            firmware_version: None,
+            retry_count: 0,
+        });
+        let same = shared.lock().unwrap().clone();
+        let mut emitted = Vec::new();
+
+        publish_device_status(&shared, same, |status| emitted.push(status));
+        publish_device_status(
+            &shared,
+            DeviceStatus {
+                revision: 99,
+                state: DeviceConnectionState::Connecting,
+                transport: TransportKind::Serial,
+                message: Some("Connecting".to_owned()),
+                firmware_version: None,
+                retry_count: 0,
+            },
+            |status| {
+                assert!(
+                    shared.try_lock().is_ok(),
+                    "device status must be emitted after releasing its mutex"
+                );
+                emitted.push(status);
+            },
+        );
+
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].revision, 1);
+        assert_eq!(shared.lock().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn stopping_all_workers_is_repeatable_and_never_double_joins() {
+        fn counting_worker(stop: Arc<AtomicBool>, exits: Arc<AtomicUsize>) -> JoinHandle<()> {
+            thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    thread::park_timeout(Duration::from_millis(5));
+                }
+                exits.fetch_add(1, Ordering::AcqRel);
+            })
+        }
+
+        let state = AppState::default();
+        let probe_exits = Arc::new(AtomicUsize::new(0));
+        let device_exits = Arc::new(AtomicUsize::new(0));
+        *state.worker_handle.lock().unwrap() = Some(counting_worker(
+            Arc::clone(&state.worker_stop),
+            Arc::clone(&probe_exits),
+        ));
+        *state.device_worker_handle.lock().unwrap() = Some(counting_worker(
+            Arc::clone(&state.device_worker_stop),
+            Arc::clone(&device_exits),
+        ));
+
+        state.stop_workers();
+        state.stop_workers();
+
+        assert_eq!(probe_exits.load(Ordering::Acquire), 1);
+        assert_eq!(device_exits.load(Ordering::Acquire), 1);
+        assert!(state.worker_handle.lock().unwrap().is_none());
+        assert!(state.device_worker_handle.lock().unwrap().is_none());
     }
 }
