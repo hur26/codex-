@@ -3,6 +3,7 @@ import { nextTick, reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AdapterStatus,
+  DeviceStatus,
   HaloSnapshot,
   RingSlot,
   TaskRecord,
@@ -12,6 +13,8 @@ const {
   createHaloStoreMock,
   loadMock,
   refreshAdapterStatusMock,
+  refreshDeviceStatusMock,
+  setPresentationMock,
   startMock,
   stopMock,
   manualBindMock,
@@ -29,6 +32,14 @@ const {
       ignoredEvents: 0,
       rejectedEvents: 0,
     } as AdapterStatus,
+    deviceStatus: {
+      revision: 1,
+      state: "virtual",
+      transport: "simulator",
+      message: null,
+      firmwareVersion: "0.1.0",
+      retryCount: 0,
+    } as DeviceStatus,
     loading: false,
     error: null as { operation: string; code: string; message: string } | null,
   };
@@ -37,6 +48,8 @@ const {
     createHaloStoreMock: vi.fn(),
     loadMock: vi.fn(() => Promise.resolve()),
     refreshAdapterStatusMock: vi.fn(() => Promise.resolve()),
+    refreshDeviceStatusMock: vi.fn(() => Promise.resolve()),
+    setPresentationMock: vi.fn(),
     startMock: vi.fn(() => Promise.resolve(true)),
     stopMock: vi.fn(() => Promise.resolve()),
     manualBindMock: vi.fn(() => Promise.resolve(state.snapshot)),
@@ -102,6 +115,8 @@ const selectedTask = task();
 const initialSnapshot: HaloSnapshot = {
   revision: 1,
   deviceMode: "virtual",
+  displayMode: "ambient",
+  selectedSlot: null,
   globalBrightness: 80,
   slots: [
     slot(0, PRIVATE_TASK_KEY),
@@ -192,6 +207,8 @@ describe("App binding orchestration", () => {
     for (const mock of [
       loadMock,
       refreshAdapterStatusMock,
+      refreshDeviceStatusMock,
+      setPresentationMock,
       startMock,
       stopMock,
       manualBindMock,
@@ -204,10 +221,19 @@ describe("App binding orchestration", () => {
     swapSlotsMock.mockImplementation(() => Promise.resolve(fakeState.snapshot));
     toggleLockMock.mockImplementation(() => Promise.resolve(fakeState.snapshot));
     mountedState = reactive(fakeState);
+    setPresentationMock.mockImplementation((input) =>
+      Promise.resolve({
+        ...mountedState.snapshot!,
+        revision: mountedState.snapshot!.revision + 1,
+        ...input,
+      }),
+    );
     createHaloStoreMock.mockReturnValue({
       state: mountedState,
       load: loadMock,
       refreshAdapterStatus: refreshAdapterStatusMock,
+      refreshDeviceStatus: refreshDeviceStatusMock,
+      setPresentation: setPresentationMock,
       start: startMock,
       stop: stopMock,
       manualBind: manualBindMock,
@@ -464,6 +490,15 @@ describe("App binding orchestration", () => {
       };
       return null;
     });
+    setPresentationMock.mockImplementationOnce(async (input) => ({
+      ...mountedState.snapshot!,
+      revision: mountedState.snapshot!.revision + 1,
+      ...input,
+      selectedSlot: 2,
+      slots: mountedState.snapshot!.slots.map((candidate) =>
+        candidate.index === 2 ? slot(2, queuedTaskKey) : candidate,
+      ),
+    }));
     const wrapper = mount(App);
     const rail = wrapper.findComponent(TaskRail);
     const controls = wrapper.findComponent(BindingControls);

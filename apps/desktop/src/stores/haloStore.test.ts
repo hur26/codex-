@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AdapterStatus,
+  DeviceStatus,
   HaloSnapshot,
   ManualBindInput,
   SimulateSignalInput,
@@ -29,6 +30,8 @@ vi.mock("@tauri-apps/api/event", () => ({
 const EMPTY_SNAPSHOT: HaloSnapshot = {
   revision: 0,
   deviceMode: "virtual",
+  displayMode: "ambient",
+  selectedSlot: null,
   globalBrightness: 100,
   slots: Array.from({ length: 4 }, (_, index) => ({
     index,
@@ -84,6 +87,15 @@ const ONLINE_STATUS: AdapterStatus = {
   rejectedEvents: 0,
 };
 
+const VIRTUAL_DEVICE_STATUS: DeviceStatus = {
+  revision: 1,
+  state: "virtual",
+  transport: "simulator",
+  message: null,
+  firmwareVersion: "0.1.0",
+  retryCount: 0,
+};
+
 function createStubBridge(
   overrides: Partial<HaloBridge> = {},
 ): HaloBridge {
@@ -91,13 +103,16 @@ function createStubBridge(
     getSnapshot: async () => EMPTY_SNAPSHOT,
     subscribeSnapshots: async () => () => undefined,
     subscribeAdapterStatus: async () => () => undefined,
+    subscribeDeviceStatus: async () => () => undefined,
     getAdapterStatus: async () => ONLINE_STATUS,
+    getDeviceStatus: async () => VIRTUAL_DEVICE_STATUS,
     simulateSignal: async () => RUNNING_SNAPSHOT,
     manualBind: async () => RUNNING_SNAPSHOT,
     toggleLock: async () => RUNNING_SNAPSHOT,
     swapSlots: async () => RUNNING_SNAPSHOT,
     updateEffect: async () => RUNNING_SNAPSHOT,
     setGlobalBrightness: async () => RUNNING_SNAPSHOT,
+    setPresentation: async () => RUNNING_SNAPSHOT,
     ...overrides,
   };
 }
@@ -293,6 +308,323 @@ describe("createHaloStore", () => {
       code: "adapterSubscriptionFailed",
       message: "subscribe 操作失败",
     });
+  });
+
+  it("cleans every successful subscription when a late third subscription fails", async () => {
+    const pendingDevice = deferred<() => void>();
+    const unlistenSnapshot = vi.fn();
+    const unlistenAdapter = vi.fn();
+    const unlistenDevice = vi.fn();
+    const bridge = createStubBridge({
+      subscribeSnapshots: async () => unlistenSnapshot,
+      subscribeAdapterStatus: async () => unlistenAdapter,
+      subscribeDeviceStatus: () => pendingDevice.promise,
+    });
+    const store = createHaloStore(bridge);
+
+    const starting = store.start();
+    const stopping = store.stop();
+    pendingDevice.resolve(unlistenDevice);
+    await Promise.all([starting, stopping]);
+    await store.stop();
+
+    expect(unlistenSnapshot).toHaveBeenCalledTimes(1);
+    expect(unlistenAdapter).toHaveBeenCalledTimes(1);
+    expect(unlistenDevice).toHaveBeenCalledTimes(1);
+  });
+
+  it("cleans late successes when a sibling subscription throws synchronously", async () => {
+    const pendingSnapshot = deferred<() => void>();
+    const unlistenSnapshot = vi.fn();
+    const unlistenDevice = vi.fn();
+    const bridge = createStubBridge({
+      subscribeSnapshots: () => pendingSnapshot.promise,
+      subscribeAdapterStatus: () => {
+        throw { code: "adapterSubscriptionFailed" };
+      },
+      subscribeDeviceStatus: async () => unlistenDevice,
+    });
+    const store = createHaloStore(bridge);
+
+    const starting = store.start();
+    pendingSnapshot.resolve(unlistenSnapshot);
+
+    await expect(starting).resolves.toBe(false);
+    expect(unlistenSnapshot).toHaveBeenCalledTimes(1);
+    expect(unlistenDevice).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails startup promptly and cleans subscriptions that succeed later", async () => {
+    const pendingDevice = deferred<() => void>();
+    const unlistenSnapshot = vi.fn();
+    const unlistenDevice = vi.fn();
+    const bridge = createStubBridge({
+      subscribeSnapshots: async () => unlistenSnapshot,
+      subscribeAdapterStatus: () => {
+        throw { code: "adapterSubscriptionFailed" };
+      },
+      subscribeDeviceStatus: () => pendingDevice.promise,
+    });
+    const store = createHaloStore(bridge);
+    let settled = false;
+
+    const starting = store.start().finally(() => {
+      settled = true;
+    });
+
+    await vi.waitFor(() => {
+      expect(settled).toBe(true);
+      expect(unlistenSnapshot).toHaveBeenCalledTimes(1);
+    });
+    await expect(starting).resolves.toBe(false);
+
+    pendingDevice.resolve(unlistenDevice);
+    await vi.waitFor(() => {
+      expect(unlistenDevice).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("stops promptly while subscriptions are pending and cleans late successes", async () => {
+    const pendingDevice = deferred<() => void>();
+    const unlistenSnapshot = vi.fn();
+    const unlistenAdapter = vi.fn();
+    const unlistenDevice = vi.fn();
+    const bridge = createStubBridge({
+      subscribeSnapshots: async () => unlistenSnapshot,
+      subscribeAdapterStatus: async () => unlistenAdapter,
+      subscribeDeviceStatus: () => pendingDevice.promise,
+    });
+    const store = createHaloStore(bridge);
+    let stopped = false;
+
+    const starting = store.start();
+    const stopping = store.stop().finally(() => {
+      stopped = true;
+    });
+
+    await vi.waitFor(() => {
+      expect(stopped).toBe(true);
+      expect(unlistenSnapshot).toHaveBeenCalledTimes(1);
+      expect(unlistenAdapter).toHaveBeenCalledTimes(1);
+    });
+    await expect(stopping).resolves.toBe(false);
+    await expect(starting).resolves.toBe(false);
+
+    pendingDevice.resolve(unlistenDevice);
+    await vi.waitFor(() => {
+      expect(unlistenDevice).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("attempts every unlisten even when an earlier cleanup throws", async () => {
+    const unlistenAdapter = vi.fn();
+    const unlistenDevice = vi.fn();
+    const bridge = createStubBridge({
+      subscribeSnapshots: async () => () => {
+        throw new Error("snapshot cleanup failed");
+      },
+      subscribeAdapterStatus: async () => unlistenAdapter,
+      subscribeDeviceStatus: async () => unlistenDevice,
+    });
+    const store = createHaloStore(bridge);
+    await store.start();
+
+    await expect(store.stop()).resolves.toBe(false);
+    expect(unlistenAdapter).toHaveBeenCalledTimes(1);
+    expect(unlistenDevice).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes device status and rejects stale or equal device revisions", async () => {
+    let listener: ((status: DeviceStatus) => void) | undefined;
+    const bridge = createStubBridge({
+      getDeviceStatus: async () => ({ ...VIRTUAL_DEVICE_STATUS, revision: 2 }),
+      subscribeDeviceStatus: async (next) => {
+        listener = next;
+        return () => undefined;
+      },
+    });
+    const store = createHaloStore(bridge);
+
+    await store.start();
+    await store.refreshDeviceStatus();
+    listener?.({
+      ...VIRTUAL_DEVICE_STATUS,
+      revision: 3,
+      state: "online",
+      transport: "serial",
+    });
+    listener?.({ ...VIRTUAL_DEVICE_STATUS, revision: 3, state: "error" });
+    listener?.({ ...VIRTUAL_DEVICE_STATUS, revision: 2, state: "connecting" });
+
+    expect(store.state.deviceStatus).toMatchObject({
+      revision: 3,
+      state: "online",
+      transport: "serial",
+    });
+  });
+
+  it("rejects equal snapshot revisions and applies setPresentation atomically", async () => {
+    let listener: ((snapshot: HaloSnapshot) => void) | undefined;
+    const presented = {
+      ...RUNNING_SNAPSHOT,
+      revision: 4,
+      displayMode: "detail" as const,
+      selectedSlot: 2,
+    };
+    const bridge = createStubBridge({
+      subscribeSnapshots: async (next) => {
+        listener = next;
+        return () => undefined;
+      },
+      setPresentation: async () => presented,
+    });
+    const store = createHaloStore(bridge);
+    await store.start();
+    listener?.({ ...RUNNING_SNAPSHOT, revision: 3 });
+    listener?.({ ...RUNNING_SNAPSHOT, revision: 3, displayMode: "overview" });
+
+    expect(store.state.snapshot?.displayMode).toBe("ambient");
+    await store.setPresentation({ displayMode: "detail", selectedSlot: 2 });
+    expect(store.state.snapshot).toStrictEqual(presented);
+  });
+
+  it("preserves the prior snapshot when setPresentation fails", async () => {
+    const bridge = createStubBridge({
+      getSnapshot: async () => RUNNING_SNAPSHOT,
+      setPresentation: async () => {
+        throw { code: "presentationRejected" };
+      },
+    });
+    const store = createHaloStore(bridge);
+    await store.load();
+    const previous = store.state.snapshot;
+
+    const result = await store.setPresentation({
+      displayMode: "overview",
+      selectedSlot: 1,
+    });
+
+    expect(result).toBeNull();
+    expect(store.state.snapshot).toBe(previous);
+    expect(store.state.error).toMatchObject({
+      operation: "setPresentation",
+      code: "presentationRejected",
+    });
+  });
+
+  it("returns null for stale command snapshots and the authoritative snapshot for equal revisions", async () => {
+    const commands = [
+      deferred<HaloSnapshot>(),
+      deferred<HaloSnapshot>(),
+    ];
+    let commandIndex = 0;
+    let listener: ((snapshot: HaloSnapshot) => void) | undefined;
+    const bridge = createStubBridge({
+      subscribeSnapshots: async (next) => {
+        listener = next;
+        return () => undefined;
+      },
+      setPresentation: () => commands[commandIndex++].promise,
+    });
+    const store = createHaloStore(bridge);
+    await store.start();
+    listener?.({ ...RUNNING_SNAPSHOT, revision: 5 });
+
+    const staleCommand = store.setPresentation({
+      displayMode: "detail",
+      selectedSlot: 2,
+    });
+    const newerEvent = {
+      ...RUNNING_SNAPSHOT,
+      revision: 7,
+      displayMode: "overview" as const,
+      selectedSlot: 1,
+    };
+    listener?.(newerEvent);
+    commands[0].resolve({
+      ...RUNNING_SNAPSHOT,
+      revision: 6,
+      displayMode: "detail",
+      selectedSlot: 2,
+    });
+
+    await expect(staleCommand).resolves.toBeNull();
+    expect(store.state.snapshot).toMatchObject(newerEvent);
+
+    const equalCommand = store.setPresentation({
+      displayMode: "detail",
+      selectedSlot: 3,
+    });
+    const equalEvent = {
+      ...RUNNING_SNAPSHOT,
+      revision: 8,
+      displayMode: "overview" as const,
+      selectedSlot: 0,
+    };
+    listener?.(equalEvent);
+    commands[1].resolve({
+      ...RUNNING_SNAPSHOT,
+      revision: 8,
+      displayMode: "detail",
+      selectedSlot: 3,
+    });
+
+    await expect(equalCommand).resolves.toBe(store.state.snapshot);
+    expect(store.state.snapshot).toMatchObject(equalEvent);
+  });
+
+  it("keeps newer command success or failure state when an older failure arrives late", async () => {
+    const olderFailure = deferred<HaloSnapshot>();
+    const newerSuccess = deferred<HaloSnapshot>();
+    const bridge = createStubBridge({
+      manualBind: () => olderFailure.promise,
+      setPresentation: () => newerSuccess.promise,
+    });
+    const store = createHaloStore(bridge);
+    await store.load();
+
+    const olderCommand = store.manualBind({
+      taskKey: "0123456789abcdef",
+      slot: 0,
+      lock: false,
+    });
+    const newerCommand = store.setPresentation({
+      displayMode: "detail",
+      selectedSlot: 0,
+    });
+    newerSuccess.resolve({
+      ...RUNNING_SNAPSHOT,
+      revision: 2,
+      displayMode: "detail",
+      selectedSlot: 0,
+    });
+    await expect(newerCommand).resolves.toMatchObject({ revision: 2 });
+
+    olderFailure.reject({ code: "olderFailure" });
+    await expect(olderCommand).resolves.toBeNull();
+    expect(store.state.error).toBeNull();
+
+    const nextOlderFailure = deferred<HaloSnapshot>();
+    const newerFailure = deferred<HaloSnapshot>();
+    bridge.manualBind = () => nextOlderFailure.promise;
+    bridge.setPresentation = () => newerFailure.promise;
+
+    const nextOlderCommand = store.manualBind({
+      taskKey: "0123456789abcdef",
+      slot: 1,
+      lock: false,
+    });
+    const nextNewerCommand = store.setPresentation({
+      displayMode: "overview",
+      selectedSlot: 1,
+    });
+    newerFailure.reject({ code: "newerFailure" });
+    await expect(nextNewerCommand).resolves.toBeNull();
+    expect(store.state.error).toMatchObject({ code: "newerFailure" });
+
+    nextOlderFailure.reject({ code: "olderFailure" });
+    await expect(nextOlderCommand).resolves.toBeNull();
+    expect(store.state.error).toMatchObject({ code: "newerFailure" });
   });
 
   it("并发 load 共享请求且事件新快照不会被旧 load 结果覆盖", async () => {
@@ -735,23 +1067,28 @@ describe("TauriHaloBridge", () => {
     await bridge.getSnapshot();
     await bridge.subscribeSnapshots(() => undefined);
     await bridge.subscribeAdapterStatus(() => undefined);
+    await bridge.subscribeDeviceStatus(() => undefined);
     await bridge.getAdapterStatus();
+    await bridge.getDeviceStatus();
     await bridge.simulateSignal(signal);
     await bridge.manualBind(binding);
     await bridge.toggleLock(1);
     await bridge.swapSlots(1, 2);
     await bridge.updateEffect(effect);
     await bridge.setGlobalBrightness(75);
+    await bridge.setPresentation({ displayMode: "detail", selectedSlot: 2 });
 
     expect(invokeMock.mock.calls).toEqual([
       ["get_snapshot"],
       ["get_adapter_status"],
+      ["get_device_status"],
       ["simulate_signal", { input: signal }],
       ["manual_bind", { input: binding }],
       ["toggle_lock", { slot: 1 }],
       ["swap_slots", { left: 1, right: 2 }],
       ["update_effect", { input: effect }],
       ["set_global_brightness", { value: 75 }],
+      ["set_presentation", { input: { displayMode: "detail", selectedSlot: 2 } }],
     ]);
     expect(listenMock).toHaveBeenCalledWith(
       "halo://snapshot",
@@ -759,6 +1096,10 @@ describe("TauriHaloBridge", () => {
     );
     expect(listenMock).toHaveBeenCalledWith(
       "halo://adapter-status",
+      expect.any(Function),
+    );
+    expect(listenMock).toHaveBeenCalledWith(
+      "halo://device-status",
       expect.any(Function),
     );
   });
@@ -955,5 +1296,39 @@ describe("TauriHaloBridge", () => {
     expect(snapshot.queue.map((task) => task.taskKey)).toEqual([
       "0000000000000003",
     ]);
+  });
+});
+
+describe("DemoHaloBridge device presentation", () => {
+  it("exposes virtual device status and publishes revisioned presentation", async () => {
+    const bridge = createDemoHaloBridge();
+    const snapshots: HaloSnapshot[] = [];
+    const unlistenSnapshot = await bridge.subscribeSnapshots((snapshot) => {
+      snapshots.push(snapshot);
+    });
+    const unlistenDevice = await bridge.subscribeDeviceStatus(() => undefined);
+
+    await expect(bridge.getDeviceStatus()).resolves.toStrictEqual(
+      VIRTUAL_DEVICE_STATUS,
+    );
+    const presented = await bridge.setPresentation({
+      displayMode: "overview",
+      selectedSlot: 1,
+    });
+
+    expect(presented).toMatchObject({
+      revision: 1,
+      displayMode: "overview",
+      selectedSlot: 1,
+    });
+    expect(snapshots).toStrictEqual([presented]);
+    await expect(
+      bridge.setPresentation({ displayMode: "overview", selectedSlot: 1 }),
+    ).resolves.toMatchObject({ revision: 1 });
+
+    unlistenSnapshot();
+    unlistenDevice();
+    unlistenSnapshot();
+    unlistenDevice();
   });
 });

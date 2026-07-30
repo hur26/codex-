@@ -5,6 +5,7 @@ import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AdapterStatus,
+  DeviceStatus,
   HaloSnapshot,
   RingSlot,
   TaskRecord,
@@ -14,9 +15,12 @@ const {
   getSnapshotMock,
   subscribeSnapshotsMock,
   subscribeAdapterStatusMock,
+  subscribeDeviceStatusMock,
   getAdapterStatusMock,
+  getDeviceStatusMock,
   unlistenMock,
   adapterUnlistenMock,
+  deviceUnlistenMock,
   fakeBridge,
   subscription,
   adapterSubscription,
@@ -29,8 +33,17 @@ const {
   };
   const stopListening: () => void = vi.fn();
   const stopAdapterListening: () => void = vi.fn();
+  const stopDeviceListening: () => void = vi.fn();
   const getSnapshot = vi.fn();
   const getAdapterStatus = vi.fn();
+  const getDeviceStatus = vi.fn(async (): Promise<DeviceStatus> => ({
+    revision: 1,
+    state: "virtual",
+    transport: "simulator",
+    message: null,
+    firmwareVersion: "0.1.0",
+    retryCount: 0,
+  }));
   const subscribeSnapshots = vi.fn(
     async (listener: (snapshot: HaloSnapshot) => void) => {
       currentSubscription.listener = listener;
@@ -43,27 +56,34 @@ const {
       return stopAdapterListening;
     },
   );
+  const subscribeDeviceStatus = vi.fn(async () => stopDeviceListening);
 
   return {
     getSnapshotMock: getSnapshot,
     subscribeSnapshotsMock: subscribeSnapshots,
     subscribeAdapterStatusMock: subscribeAdapterStatus,
+    subscribeDeviceStatusMock: subscribeDeviceStatus,
     getAdapterStatusMock: getAdapterStatus,
+    getDeviceStatusMock: getDeviceStatus,
     unlistenMock: stopListening,
     adapterUnlistenMock: stopAdapterListening,
+    deviceUnlistenMock: stopDeviceListening,
     subscription: currentSubscription,
     adapterSubscription: currentAdapterSubscription,
     fakeBridge: {
       getSnapshot,
       subscribeSnapshots,
       subscribeAdapterStatus,
+      subscribeDeviceStatus,
       getAdapterStatus,
+      getDeviceStatus,
       simulateSignal: vi.fn(),
       manualBind: vi.fn(),
       toggleLock: vi.fn(),
       swapSlots: vi.fn(),
       updateEffect: vi.fn(),
       setGlobalBrightness: vi.fn(),
+      setPresentation: vi.fn(),
     },
   };
 });
@@ -121,6 +141,8 @@ function snapshot(
   return {
     revision,
     deviceMode: "virtual",
+    displayMode: "ambient",
+    selectedSlot: null,
     globalBrightness: 76,
     slots: [
       {
@@ -164,10 +186,13 @@ describe("Hook 到四环实时集成", () => {
     getSnapshotMock.mockResolvedValue(INITIAL_SNAPSHOT);
     getAdapterStatusMock.mockReset();
     getAdapterStatusMock.mockResolvedValue(DEGRADED_STATUS);
+    getDeviceStatusMock.mockClear();
     subscribeSnapshotsMock.mockClear();
     subscribeAdapterStatusMock.mockClear();
+    subscribeDeviceStatusMock.mockClear();
     vi.mocked(unlistenMock).mockClear();
     vi.mocked(adapterUnlistenMock).mockClear();
+    vi.mocked(deviceUnlistenMock).mockClear();
   });
 
   afterEach(() => {
@@ -185,8 +210,10 @@ describe("Hook 到四环实时集成", () => {
 
     expect(getSnapshotMock).toHaveBeenCalledTimes(1);
     expect(getAdapterStatusMock).toHaveBeenCalledTimes(1);
+    expect(getDeviceStatusMock).toHaveBeenCalledTimes(1);
     expect(subscribeSnapshotsMock).toHaveBeenCalledTimes(1);
     expect(subscribeAdapterStatusMock).toHaveBeenCalledTimes(1);
+    expect(subscribeDeviceStatusMock).toHaveBeenCalledTimes(1);
     expect(subscription.listener).toBeTypeOf("function");
 
     wrapper.unmount();
@@ -194,6 +221,7 @@ describe("Hook 到四环实时集成", () => {
 
     expect(unlistenMock).toHaveBeenCalledTimes(1);
     expect(adapterUnlistenMock).toHaveBeenCalledTimes(1);
+    expect(deviceUnlistenMock).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 

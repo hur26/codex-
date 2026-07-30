@@ -22,6 +22,13 @@ export type BindingMode = "auto" | "manual";
 export type DeviceMode = "virtual";
 export type Direction = "clockwise" | "counterClockwise";
 export type DisplayMode = "ambient" | "overview" | "detail";
+export type DeviceConnectionState =
+  | "virtual"
+  | "connecting"
+  | "online"
+  | "incompatible"
+  | "error";
+export type DeviceTransportKind = "simulator" | "serial";
 
 export interface EffectProfile {
   brightness: number;
@@ -52,10 +59,21 @@ export interface RingSlot {
 export interface HaloSnapshot {
   revision: number;
   deviceMode: DeviceMode;
+  displayMode: DisplayMode;
+  selectedSlot: number | null;
   globalBrightness: number;
   slots: RingSlot[];
   tasks: TaskRecord[];
   queue: TaskRecord[];
+}
+
+export interface DeviceStatus {
+  revision: number;
+  state: DeviceConnectionState;
+  transport: DeviceTransportKind;
+  message: string | null;
+  firmwareVersion: string | null;
+  retryCount: number;
 }
 
 export interface SimulateSignalInput {

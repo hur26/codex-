@@ -4,6 +4,8 @@ import type {
   AdapterStatus,
   BindingMode,
   Confidence,
+  DeviceStatus,
+  DisplayMode,
   EffectProfile,
   HaloSnapshot,
   ManualBindInput,
@@ -25,12 +27,20 @@ export interface HaloBridge {
     listener: (status: AdapterStatus) => void,
   ): Promise<() => void>;
   getAdapterStatus(): Promise<AdapterStatus>;
+  getDeviceStatus(): Promise<DeviceStatus>;
+  subscribeDeviceStatus(
+    listener: (status: DeviceStatus) => void,
+  ): Promise<() => void>;
   simulateSignal(input: SimulateSignalInput): Promise<HaloSnapshot>;
   manualBind(input: ManualBindInput): Promise<HaloSnapshot>;
   toggleLock(slot: number): Promise<HaloSnapshot>;
   swapSlots(left: number, right: number): Promise<HaloSnapshot>;
   updateEffect(input: UpdateEffectInput): Promise<HaloSnapshot>;
   setGlobalBrightness(value: number): Promise<HaloSnapshot>;
+  setPresentation(input: {
+    displayMode: DisplayMode;
+    selectedSlot: number | null;
+  }): Promise<HaloSnapshot>;
 }
 
 class TauriHaloBridge implements HaloBridge {
@@ -58,6 +68,18 @@ class TauriHaloBridge implements HaloBridge {
     return invoke<AdapterStatus>("get_adapter_status");
   }
 
+  getDeviceStatus(): Promise<DeviceStatus> {
+    return invoke<DeviceStatus>("get_device_status");
+  }
+
+  async subscribeDeviceStatus(
+    listener: (status: DeviceStatus) => void,
+  ): Promise<() => void> {
+    return listen<DeviceStatus>("halo://device-status", (event) => {
+      listener(event.payload);
+    });
+  }
+
   simulateSignal(input: SimulateSignalInput): Promise<HaloSnapshot> {
     return invoke<HaloSnapshot>("simulate_signal", { input });
   }
@@ -81,6 +103,13 @@ class TauriHaloBridge implements HaloBridge {
   setGlobalBrightness(value: number): Promise<HaloSnapshot> {
     return invoke<HaloSnapshot>("set_global_brightness", { value });
   }
+
+  setPresentation(input: {
+    displayMode: DisplayMode;
+    selectedSlot: number | null;
+  }): Promise<HaloSnapshot> {
+    return invoke<HaloSnapshot>("set_presentation", { input });
+  }
 }
 
 const DEFAULT_EFFECT: EffectProfile = {
@@ -100,6 +129,15 @@ const DEMO_ADAPTER_STATUS: AdapterStatus = {
   rejectedEvents: 0,
 };
 
+const DEMO_DEVICE_STATUS: DeviceStatus = {
+  revision: 1,
+  state: "virtual",
+  transport: "simulator",
+  message: null,
+  firmwareVersion: "0.1.0",
+  retryCount: 0,
+};
+
 function emptySlot(index: number): RingSlot {
   return {
     index,
@@ -117,6 +155,8 @@ function initialDemoSnapshot(): HaloSnapshot {
   return {
     revision: 0,
     deviceMode: "virtual",
+    displayMode: "ambient",
+    selectedSlot: null,
     globalBrightness: 100,
     slots: Array.from({ length: 4 }, (_, index) => emptySlot(index)),
     tasks: [],
@@ -212,6 +252,9 @@ class DemoHaloBridge implements HaloBridge {
   private readonly adapterStatusListeners = new Set<
     (status: AdapterStatus) => void
   >();
+  private readonly deviceStatusListeners = new Set<
+    (status: DeviceStatus) => void
+  >();
 
   async getSnapshot(): Promise<HaloSnapshot> {
     return this.currentSnapshot();
@@ -247,6 +290,24 @@ class DemoHaloBridge implements HaloBridge {
 
   async getAdapterStatus(): Promise<AdapterStatus> {
     return { ...DEMO_ADAPTER_STATUS };
+  }
+
+  async getDeviceStatus(): Promise<DeviceStatus> {
+    return { ...DEMO_DEVICE_STATUS };
+  }
+
+  async subscribeDeviceStatus(
+    listener: (status: DeviceStatus) => void,
+  ): Promise<() => void> {
+    this.deviceStatusListeners.add(listener);
+    let active = true;
+
+    return () => {
+      if (active) {
+        active = false;
+        this.deviceStatusListeners.delete(listener);
+      }
+    };
   }
 
   async simulateSignal(input: SimulateSignalInput): Promise<HaloSnapshot> {
@@ -411,6 +472,27 @@ class DemoHaloBridge implements HaloBridge {
       return this.currentSnapshot();
     }
     this.snapshot.globalBrightness = value;
+    return this.publishChanged();
+  }
+
+  async setPresentation(input: {
+    displayMode: DisplayMode;
+    selectedSlot: number | null;
+  }): Promise<HaloSnapshot> {
+    if (
+      input.selectedSlot !== null &&
+      (input.selectedSlot < 0 || input.selectedSlot >= this.snapshot.slots.length)
+    ) {
+      throw { code: "slotOutOfBounds", slot: input.selectedSlot };
+    }
+    if (
+      this.snapshot.displayMode === input.displayMode &&
+      this.snapshot.selectedSlot === input.selectedSlot
+    ) {
+      return this.currentSnapshot();
+    }
+    this.snapshot.displayMode = input.displayMode;
+    this.snapshot.selectedSlot = input.selectedSlot;
     return this.publishChanged();
   }
 

@@ -67,9 +67,89 @@ body {
 
 .brand-lockup,
 .header-readouts,
+.status-cluster,
 .adapter-state {
   display: flex;
   align-items: center;
+}
+
+.status-cluster {
+  justify-self: end;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.device-status,
+.adapter-state {
+  font-family: var(--halo-font-mono);
+}
+
+.device-status {
+  --device-status-color: var(--halo-unknown);
+
+  display: flex;
+  min-width: 12rem;
+  align-items: center;
+  gap: 0.58rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--halo-hairline);
+  border-radius: 0.35rem;
+  background: var(--halo-glass-sheen);
+}
+
+.device-status > i {
+  width: 0.5rem;
+  flex: 0 0 auto;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: var(--device-status-color);
+  box-shadow: 0 0 0.65rem var(--device-status-color);
+}
+
+.device-status > span:not(.device-status-meta) {
+  display: grid;
+  min-width: 0;
+  gap: 0.04rem;
+}
+
+.device-status small,
+.device-status em,
+.device-status b {
+  color: var(--halo-text-muted);
+  font-size: 0.46rem;
+  font-style: normal;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.device-status strong {
+  overflow: hidden;
+  color: var(--device-status-color);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.device-status-meta {
+  display: grid;
+  margin-left: auto;
+  text-align: right;
+}
+
+.device-status-virtual,
+.device-status-connecting {
+  --device-status-color: var(--halo-unknown);
+}
+
+.device-status-online {
+  --device-status-color: var(--halo-round-completed);
+}
+
+.device-status-incompatible,
+.device-status-error {
+  --device-status-color: var(--halo-failed);
 }
 
 .brand-lockup {
@@ -206,11 +286,13 @@ body {
 }
 
 @media (forced-colors: active) {
+  .device-status,
   .adapter-state {
     border-color: CanvasText;
     forced-color-adjust: auto;
   }
 
+  .device-status > i,
   .adapter-state > i {
     background: currentcolor;
     box-shadow: none;
@@ -465,22 +547,69 @@ button {
   }
 }
 
+@media (max-width: 900px) {
+  .device-status,
+  .adapter-state {
+    min-width: 8.5rem;
+  }
+
+  .device-status-meta {
+    display: none;
+  }
+}
+
 @media (max-width: 700px) {
   .app-header {
+    grid-template-columns: minmax(4.8rem, 1fr) auto;
+    gap: 0.4rem;
     min-height: 4.3rem;
     padding-inline: 0.8rem;
   }
 
   .brand-glyph {
-    width: 2.2rem;
+    display: none;
   }
 
   .system-name {
     display: none;
   }
 
+  .app-header h1 {
+    font-size: 0.7rem;
+    letter-spacing: 0;
+  }
+
+  .status-cluster {
+    gap: 0.25rem;
+  }
+
   .adapter-state {
-    min-width: 8.8rem;
+    min-width: 5.4rem;
+  }
+
+  .device-status {
+    min-width: 6.5rem;
+  }
+
+  .device-status,
+  .adapter-state {
+    gap: 0.3rem;
+    padding-inline: 0.35rem;
+  }
+
+  .device-status > i,
+  .adapter-state > i {
+    width: 0.35rem;
+  }
+
+  .device-status strong,
+  .adapter-state strong {
+    font-size: 0.54rem;
+    letter-spacing: 0;
+  }
+
+  .adapter-state em {
+    display: none;
   }
 
   .device-stage {

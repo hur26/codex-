@@ -3,12 +3,22 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { nextTick, reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AdapterStatus, HaloSnapshot, RingSlot, TaskRecord } from "./types/halo";
+import type {
+  AdapterStatus,
+  DeviceStatus,
+  HaloSnapshot,
+  RingSlot,
+  TaskRecord,
+} from "./types/halo";
 
 const {
   createHaloStoreMock,
   loadMock,
   refreshAdapterStatusMock,
+  refreshDeviceStatusMock,
+  setPresentationMock,
+  manualBindMock,
+  swapSlotsMock,
   startMock,
   stopMock,
   fakeState,
@@ -23,6 +33,14 @@ const {
       ignoredEvents: 0,
       rejectedEvents: 0,
     } as AdapterStatus,
+    deviceStatus: {
+      revision: 1,
+      state: "virtual",
+      transport: "simulator",
+      message: null,
+      firmwareVersion: "0.1.0",
+      retryCount: 0,
+    } as DeviceStatus,
     loading: false,
     error: null as { operation: string; code: string; message: string } | null,
   };
@@ -31,6 +49,10 @@ const {
     createHaloStoreMock: vi.fn(),
     loadMock: vi.fn(() => Promise.resolve()),
     refreshAdapterStatusMock: vi.fn(() => Promise.resolve()),
+    refreshDeviceStatusMock: vi.fn(() => Promise.resolve()),
+    setPresentationMock: vi.fn(),
+    manualBindMock: vi.fn(),
+    swapSlotsMock: vi.fn(),
     startMock: vi.fn(() => Promise.resolve(true)),
     stopMock: vi.fn(() => Promise.resolve()),
     fakeState: state,
@@ -42,6 +64,8 @@ vi.mock("./stores/haloStore", () => ({
 }));
 
 import App from "./App.vue";
+import appSource from "./App.vue?raw";
+import BindingControls from "./components/BindingControls.vue";
 import CentralDisplay from "./components/CentralDisplay.vue";
 import CrownControl from "./components/CrownControl.vue";
 import HaloPreview from "./components/HaloPreview.vue";
@@ -52,8 +76,26 @@ const baseStyles = readFileSync(
   resolve(process.cwd(), "src/styles/base.css"),
   "utf8",
 );
+const haloTypesSource = readFileSync(
+  resolve(process.cwd(), "src/types/halo.ts"),
+  "utf8",
+);
+const haloStoreSource = readFileSync(
+  resolve(process.cwd(), "src/stores/haloStore.ts"),
+  "utf8",
+);
 
 enableAutoUnmount(afterEach);
+
+let mountedState: { snapshot: HaloSnapshot | null };
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 function task(
   index: number,
@@ -103,6 +145,8 @@ const records = [
 const snapshot: HaloSnapshot = {
   revision: 1,
   deviceMode: "virtual",
+  displayMode: "ambient",
+  selectedSlot: null,
   globalBrightness: 86,
   slots: records.slice(0, 4).map((record, index) => slot(index, record)),
   tasks: records,
@@ -121,16 +165,45 @@ describe("App control center", () => {
       ignoredEvents: 0,
       rejectedEvents: 0,
     };
+    fakeState.deviceStatus = {
+      revision: 1,
+      state: "virtual",
+      transport: "simulator",
+      message: null,
+      firmwareVersion: "0.1.0",
+      retryCount: 0,
+    };
     fakeState.loading = false;
     fakeState.error = null;
     loadMock.mockClear();
     refreshAdapterStatusMock.mockClear();
+    refreshDeviceStatusMock.mockClear();
+    setPresentationMock.mockReset();
+    manualBindMock.mockReset();
+    manualBindMock.mockResolvedValue(snapshot);
+    swapSlotsMock.mockReset();
+    swapSlotsMock.mockResolvedValue(snapshot);
+    const reactiveState = reactive(fakeState);
+    mountedState = reactiveState;
+    setPresentationMock.mockImplementation(async (input) => {
+      const next = {
+        ...reactiveState.snapshot!,
+        revision: reactiveState.snapshot!.revision + 1,
+        ...input,
+      };
+      reactiveState.snapshot = next;
+      return next;
+    });
     startMock.mockClear();
     stopMock.mockClear();
     createHaloStoreMock.mockReturnValue({
-      state: reactive(fakeState),
+      state: reactiveState,
       load: loadMock,
       refreshAdapterStatus: refreshAdapterStatusMock,
+      refreshDeviceStatus: refreshDeviceStatusMock,
+      setPresentation: setPresentationMock,
+      manualBind: manualBindMock,
+      swapSlots: swapSlotsMock,
       start: startMock,
       stop: stopMock,
     });
@@ -147,6 +220,7 @@ describe("App control center", () => {
 
     expect(loadMock).toHaveBeenCalledTimes(1);
     expect(refreshAdapterStatusMock).toHaveBeenCalledTimes(1);
+    expect(refreshDeviceStatusMock).toHaveBeenCalledTimes(1);
     expect(startMock).toHaveBeenCalledTimes(1);
 
     wrapper.unmount();
@@ -173,7 +247,7 @@ describe("App control center", () => {
   it("顶部明确显示虚拟设备与适配器状态，并组合完整控制中心", () => {
     const wrapper = mount(App);
 
-    expect(wrapper.get("[data-app-header]").text()).toContain("VIRTUAL DEVICE");
+    expect(wrapper.get("[data-device-status]").text()).toContain("VIRTUAL");
     expect(wrapper.get("[data-adapter-state]").attributes("data-adapter-state")).toBe(
       "degraded",
     );
@@ -187,7 +261,7 @@ describe("App control center", () => {
     expect(wrapper.get("[data-queue-task]").text()).toContain("QUEUE 01");
   });
 
-  it("圆环与表冠共同管理 selectedSlot/displayMode，中央点击不会误选内圈", async () => {
+  it("routes ring and crown presentation through the authoritative store", async () => {
     const wrapper = mount(App);
     const preview = wrapper.findComponent(HaloPreview);
     const display = wrapper.findComponent(CentralDisplay);
@@ -197,17 +271,268 @@ describe("App control center", () => {
     expect(preview.props("selectedSlot")).toBe(null);
 
     await preview.vm.$emit("select", 2);
+    await flushPromises();
+    expect(setPresentationMock).toHaveBeenLastCalledWith({
+      displayMode: "ambient",
+      selectedSlot: 2,
+    });
     expect(preview.props("selectedSlot")).toBe(2);
     expect(display.props("selectedSlot")).toBe(2);
 
     await crown.vm.$emit("update:mode", "detail");
+    await flushPromises();
+    expect(setPresentationMock).toHaveBeenLastCalledWith({
+      displayMode: "detail",
+      selectedSlot: 2,
+    });
     expect(display.props("mode")).toBe("detail");
 
     await crown.vm.$emit("select", 3);
+    await flushPromises();
+    expect(setPresentationMock).toHaveBeenLastCalledWith({
+      displayMode: "detail",
+      selectedSlot: 3,
+    });
     expect(preview.props("selectedSlot")).toBe(3);
 
     await wrapper.get("[data-central-display]").trigger("click");
     expect(preview.props("selectedSlot")).toBe(3);
+  });
+
+  it("serializes presentation intents and builds each payload from the latest snapshot", async () => {
+    const slotGate = deferred<void>();
+    const modeGate = deferred<void>();
+    const gates = [slotGate, modeGate];
+    let commandIndex = 0;
+    setPresentationMock.mockImplementation(async (input) => {
+      await gates[commandIndex++].promise;
+      const next = {
+        ...mountedState.snapshot!,
+        revision: mountedState.snapshot!.revision + 1,
+        ...input,
+      };
+      mountedState.snapshot = next;
+      return next;
+    });
+    const wrapper = mount(App);
+    const preview = wrapper.findComponent(HaloPreview);
+    const display = wrapper.findComponent(CentralDisplay);
+    const crown = wrapper.findComponent(CrownControl);
+
+    preview.vm.$emit("select", 2);
+    crown.vm.$emit("update:mode", "detail");
+    await nextTick();
+
+    modeGate.resolve(undefined);
+    await flushPromises();
+    expect(setPresentationMock).toHaveBeenCalledTimes(1);
+    expect(setPresentationMock).toHaveBeenLastCalledWith({
+      displayMode: "ambient",
+      selectedSlot: 2,
+    });
+    expect(mountedState.snapshot).toMatchObject({
+      revision: 1,
+      displayMode: "ambient",
+      selectedSlot: null,
+    });
+
+    slotGate.resolve(undefined);
+    await flushPromises();
+
+    expect(setPresentationMock.mock.calls).toEqual([
+      [{ displayMode: "ambient", selectedSlot: 2 }],
+      [{ displayMode: "detail", selectedSlot: 2 }],
+    ]);
+    expect(preview.props("selectedSlot")).toBe(2);
+    expect(display.props()).toMatchObject({
+      mode: "detail",
+      selectedSlot: 2,
+    });
+  });
+
+  it("derives task focus from the authoritative snapshot when an equal revision event wins", async () => {
+    const authoritativeSnapshots = [
+      {
+        ...snapshot,
+        revision: 2,
+        selectedSlot: 1,
+      },
+      {
+        ...snapshot,
+        revision: 3,
+        selectedSlot: 0,
+      },
+    ];
+    let responseIndex = 0;
+    setPresentationMock.mockImplementation(async () => {
+      mountedState.snapshot = authoritativeSnapshots[responseIndex++];
+      return mountedState.snapshot;
+    });
+    const wrapper = mount(App);
+    const preview = wrapper.findComponent(HaloPreview);
+    const rail = wrapper.findComponent(TaskRail);
+    const controls = wrapper.findComponent(BindingControls);
+
+    preview.vm.$emit("select", 2);
+    await flushPromises();
+    expect(controls.props("selectedTask")).toMatchObject({
+      taskKey: records[1].taskKey,
+    });
+
+    rail.vm.$emit("select-task", records[3].taskKey);
+    await flushPromises();
+    expect(controls.props("selectedTask")).toMatchObject({
+      taskKey: records[0].taskKey,
+    });
+  });
+
+  it("cancels queued presentation intents and ignores in-flight completion after unmount", async () => {
+    const inFlight = deferred<HaloSnapshot | null>();
+    const slotsRead = vi.fn();
+    const lateSnapshot: HaloSnapshot = {
+      ...snapshot,
+      revision: 2,
+      selectedSlot: 2,
+      get slots() {
+        slotsRead();
+        return snapshot.slots;
+      },
+    };
+    setPresentationMock.mockReturnValueOnce(inFlight.promise);
+    const wrapper = mount(App);
+    const preview = wrapper.findComponent(HaloPreview);
+    const crown = wrapper.findComponent(CrownControl);
+
+    preview.vm.$emit("select", 2);
+    crown.vm.$emit("update:mode", "detail");
+    await nextTick();
+    expect(setPresentationMock).toHaveBeenCalledTimes(1);
+
+    wrapper.unmount();
+    inFlight.resolve(lateSnapshot);
+    await flushPromises();
+
+    expect(setPresentationMock).toHaveBeenCalledTimes(1);
+    expect(slotsRead).not.toHaveBeenCalled();
+  });
+
+  it("does not dispatch presentation when manualBind completes after unmount", async () => {
+    const binding = deferred<HaloSnapshot | null>();
+    manualBindMock.mockReturnValueOnce(binding.promise);
+    const wrapper = mount(App);
+    const controls = wrapper.findComponent(BindingControls);
+
+    controls.vm.$emit("bind", records[2].taskKey, 3);
+    await nextTick();
+    expect(manualBindMock).toHaveBeenCalledWith({
+      taskKey: records[2].taskKey,
+      slot: 3,
+      lock: false,
+    });
+
+    wrapper.unmount();
+    binding.resolve({ ...snapshot, revision: 2 });
+    await flushPromises();
+
+    expect(setPresentationMock).not.toHaveBeenCalled();
+  });
+
+  it("does not dispatch presentation when swapSlots completes after unmount", async () => {
+    const swapping = deferred<HaloSnapshot | null>();
+    swapSlotsMock.mockReturnValueOnce(swapping.promise);
+    const wrapper = mount(App);
+    const preview = wrapper.findComponent(HaloPreview);
+
+    preview.vm.$emit("dragstart", {
+      kind: "slot",
+      slot: 0,
+      taskKey: records[0].taskKey,
+    });
+    preview.vm.$emit("drop", 2);
+    await nextTick();
+    expect(swapSlotsMock).toHaveBeenCalledWith(0, 2);
+
+    wrapper.unmount();
+    swapping.resolve({ ...snapshot, revision: 2 });
+    await flushPromises();
+
+    expect(setPresentationMock).not.toHaveBeenCalled();
+  });
+
+  it("routes task selection through setPresentation without optimistic mutation", async () => {
+    const pending = new Promise<HaloSnapshot>(() => undefined);
+    setPresentationMock.mockReturnValueOnce(pending);
+    const wrapper = mount(App);
+    const rail = wrapper.findComponent(TaskRail);
+    const preview = wrapper.findComponent(HaloPreview);
+
+    await rail.vm.$emit("select-task", records[2].taskKey);
+    await nextTick();
+
+    expect(setPresentationMock).toHaveBeenCalledWith({
+      displayMode: "ambient",
+      selectedSlot: 2,
+    });
+    expect(preview.props("selectedSlot")).toBe(null);
+  });
+
+  it("preserves presentation and task focus when every presentation command fails", async () => {
+    fakeState.snapshot = {
+      ...snapshot,
+      displayMode: "overview",
+      selectedSlot: 1,
+    };
+    setPresentationMock.mockResolvedValue(null);
+    const wrapper = mount(App);
+    const preview = wrapper.findComponent(HaloPreview);
+    const display = wrapper.findComponent(CentralDisplay);
+    const crown = wrapper.findComponent(CrownControl);
+    const rail = wrapper.findComponent(TaskRail);
+    const controls = wrapper.findComponent(BindingControls);
+
+    await preview.vm.$emit("select", 2);
+    await crown.vm.$emit("update:mode", "detail");
+    await rail.vm.$emit("select-task", records[2].taskKey);
+    await flushPromises();
+
+    expect(setPresentationMock.mock.calls).toEqual([
+      [{ displayMode: "overview", selectedSlot: 2 }],
+      [{ displayMode: "detail", selectedSlot: 1 }],
+      [{ displayMode: "overview", selectedSlot: 2 }],
+    ]);
+    expect(preview.props("selectedSlot")).toBe(1);
+    expect(display.props()).toMatchObject({
+      mode: "overview",
+      selectedSlot: 1,
+    });
+    expect(controls.props("selectedTask")).toBeNull();
+  });
+
+  it("requires authoritative snapshot and device APIs without compatibility guards", () => {
+    expect(haloTypesSource).toContain("displayMode: DisplayMode;");
+    expect(haloTypesSource).toContain("selectedSlot: number | null;");
+    expect(haloTypesSource).not.toContain("displayMode?: DisplayMode;");
+    expect(haloTypesSource).not.toContain("selectedSlot?: number | null;");
+    expect(appSource).not.toContain('"selectedSlot" in snapshot');
+    expect(appSource).not.toContain('typeof store.setPresentation');
+    expect(appSource).not.toContain('typeof store.refreshDeviceStatus');
+    expect(haloStoreSource).not.toContain('typeof bridge.getDeviceStatus');
+    expect(haloStoreSource).not.toContain('typeof bridge.subscribeDeviceStatus');
+  });
+
+  it("keeps ring and adapter UI visible for incompatible devices", () => {
+    fakeState.deviceStatus = {
+      ...fakeState.deviceStatus,
+      revision: 2,
+      state: "incompatible",
+      transport: "serial",
+      message: "Protocol version mismatch",
+    };
+    const wrapper = mount(App);
+
+    expect(wrapper.get("[data-device-status]").text()).toContain("INCOMPATIBLE");
+    expect(wrapper.get("[data-adapter-state]").element).toBeTruthy();
+    expect(wrapper.findComponent(HaloPreview).exists()).toBe(true);
   });
 
   it.each([

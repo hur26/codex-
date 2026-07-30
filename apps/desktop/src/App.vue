@@ -4,6 +4,7 @@ import ActivityStrip from "./components/ActivityStrip.vue";
 import BindingControls from "./components/BindingControls.vue";
 import CentralDisplay from "./components/CentralDisplay.vue";
 import CrownControl from "./components/CrownControl.vue";
+import DeviceStatusView from "./components/DeviceStatus.vue";
 import EffectEditor from "./components/EffectEditor.vue";
 import HaloPreview from "./components/HaloPreview.vue";
 import TaskRail from "./components/TaskRail.vue";
@@ -16,14 +17,13 @@ import type {
   AdapterState,
   DisplayMode,
   EffectProfile,
+  HaloSnapshot,
   RingSlot,
   UpdateEffectInput,
 } from "./types/halo";
 
 const store = createHaloStore();
-const selectedSlot = ref<number | null>(null);
 const selectedTaskKey = ref<string | null>(null);
-const displayMode = ref<DisplayMode>("ambient");
 const renderedAtMs = ref(Date.now());
 const activeDrag = ref<ActiveDrag | null>(null);
 const bindingCommandPending = ref(false);
@@ -35,6 +35,20 @@ let effectQueueMounted = true;
 let mountedGeneration = 0;
 let pendingGlobalBrightness: number | null = null;
 const pendingEffects = new Map<number, UpdateEffectInput>();
+
+type PresentationInputBuilder = (snapshot: HaloSnapshot | null) => {
+  displayMode: DisplayMode;
+  selectedSlot: number | null;
+};
+
+interface QueuedPresentationIntent {
+  buildInput: PresentationInputBuilder;
+  resolve: (snapshot: HaloSnapshot | null) => void;
+}
+
+let presentationCommandRunning = false;
+let presentationQueueActive = true;
+const pendingPresentationIntents: QueuedPresentationIntent[] = [];
 
 const ADAPTER_LABELS: Record<AdapterState, string> = {
   online: "ONLINE",
@@ -74,6 +88,14 @@ const emptySlots = Array.from({ length: 4 }, (_, index): RingSlot => ({
 }));
 
 const slots = computed(() => store.state.snapshot?.slots ?? emptySlots);
+const selectedSlot = computed(() => {
+  const snapshot = store.state.snapshot;
+  return snapshot === null ? null : snapshot.selectedSlot;
+});
+const displayMode = computed(() => {
+  const snapshot = store.state.snapshot;
+  return snapshot === null ? "ambient" : snapshot.displayMode;
+});
 const tasks = computed(() => store.state.snapshot?.tasks ?? []);
 const queue = computed(() => store.state.snapshot?.queue ?? []);
 const selectedSlotRecord = computed(
@@ -91,25 +113,114 @@ const visibleAppError = computed(
   () => store.state.error ?? effectBatchError.value,
 );
 
-function selectSlot(slot: number) {
-  if (slot < 0 || slot > 3) {
-    return;
+function enqueuePresentation(
+  buildInput: PresentationInputBuilder,
+): Promise<HaloSnapshot | null> {
+  if (!presentationQueueActive) {
+    return Promise.resolve(null);
   }
-  selectedSlot.value = slot;
-  const taskKey =
-    slots.value.find((candidate) => candidate.index === slot)?.taskKey ?? null;
-  if (taskKey) {
-    selectedTaskKey.value = taskKey;
+
+  if (presentationCommandRunning) {
+    return new Promise((resolve) => {
+      pendingPresentationIntents.push({ buildInput, resolve });
+    });
+  }
+
+  presentationCommandRunning = true;
+  const command = executePresentation(buildInput);
+  void command.then(
+    (snapshot) => completePresentation(snapshot),
+    () => completePresentation(null),
+  );
+  return command;
+}
+
+function executePresentation(
+  buildInput: PresentationInputBuilder,
+): Promise<HaloSnapshot | null> {
+  try {
+    return store.setPresentation(buildInput(store.state.snapshot));
+  } catch (error: unknown) {
+    return Promise.reject(error);
   }
 }
 
-function selectTask(taskKey: string) {
+function advancePresentationQueue(): void {
+  if (!presentationQueueActive) {
+    presentationCommandRunning = false;
+    cancelPendingPresentationIntents();
+    return;
+  }
+
+  const next = pendingPresentationIntents.shift();
+  if (!next) {
+    presentationCommandRunning = false;
+    return;
+  }
+
+  const command = executePresentation(next.buildInput);
+  void command.then(
+    (snapshot) => {
+      if (!presentationQueueActive) {
+        next.resolve(null);
+        advancePresentationQueue();
+        return;
+      }
+      syncSelectedTask(snapshot);
+      next.resolve(snapshot);
+      advancePresentationQueue();
+    },
+    () => {
+      next.resolve(null);
+      advancePresentationQueue();
+    },
+  );
+}
+
+function completePresentation(snapshot: HaloSnapshot | null): void {
+  if (presentationQueueActive) {
+    syncSelectedTask(snapshot);
+  }
+  advancePresentationQueue();
+}
+
+function syncSelectedTask(snapshot: HaloSnapshot | null): void {
+  if (!snapshot) {
+    return;
+  }
+  selectedTaskKey.value =
+    snapshot.selectedSlot === null
+      ? null
+      : (snapshot.slots.find(
+          (candidate) => candidate.index === snapshot.selectedSlot,
+        )?.taskKey ?? null);
+}
+
+function cancelPendingPresentationIntents(): void {
+  for (const intent of pendingPresentationIntents.splice(0)) {
+    intent.resolve(null);
+  }
+}
+
+async function selectSlot(slot: number) {
+  if (slot < 0 || slot > 3) {
+    return;
+  }
+  await enqueuePresentation((current) => ({
+    displayMode: current?.displayMode ?? "ambient",
+    selectedSlot: slot,
+  }));
+}
+
+async function selectTask(taskKey: string) {
   if (!tasks.value.some((task) => task.taskKey === taskKey)) {
     return;
   }
-  selectedTaskKey.value = taskKey;
-  selectedSlot.value =
-    slots.value.find((slot) => slot.taskKey === taskKey)?.index ?? null;
+  await enqueuePresentation((current) => ({
+    displayMode: current?.displayMode ?? "ambient",
+    selectedSlot:
+      current?.slots.find((slot) => slot.taskKey === taskKey)?.index ?? null,
+  }));
 }
 
 function taskDragSourceExists(
@@ -175,8 +286,10 @@ async function manualBind(taskKey: string, slot: number) {
   try {
     const snapshot = await store.manualBind({ taskKey, slot, lock: false });
     if (snapshot) {
-      selectedTaskKey.value = taskKey;
-      selectedSlot.value = slot;
+      await enqueuePresentation((current) => ({
+        displayMode: current?.displayMode ?? "ambient",
+        selectedSlot: slot,
+      }));
     }
   } finally {
     bindingCommandPending.value = false;
@@ -218,15 +331,21 @@ async function dropOnSlot(slot: number) {
   try {
     const snapshot = await store.swapSlots(drag.slot, slot);
     if (snapshot) {
-      selectedSlot.value = slot;
+      await enqueuePresentation((current) => ({
+        displayMode: current?.displayMode ?? "ambient",
+        selectedSlot: slot,
+      }));
     }
   } finally {
     bindingCommandPending.value = false;
   }
 }
 
-function updateDisplayMode(mode: DisplayMode) {
-  displayMode.value = mode;
+async function updateDisplayMode(mode: DisplayMode) {
+  await enqueuePresentation((current) => ({
+    displayMode: mode,
+    selectedSlot: current?.selectedSlot ?? null,
+  }));
 }
 
 function setGlobalBrightness(value: number) {
@@ -305,11 +424,16 @@ async function initializeStore(generation: number) {
   ) {
     return;
   }
-  await Promise.all([store.load(), store.refreshAdapterStatus()]);
+  await Promise.all([
+    store.load(),
+    store.refreshAdapterStatus(),
+    store.refreshDeviceStatus(),
+  ]);
 }
 
 onMounted(() => {
   effectQueueMounted = true;
+  presentationQueueActive = true;
   mountedGeneration += 1;
   const generation = mountedGeneration;
   renderedAtMs.value = Date.now();
@@ -323,6 +447,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   effectQueueMounted = false;
+  presentationQueueActive = false;
+  cancelPendingPresentationIntents();
   mountedGeneration += 1;
   pendingGlobalBrightness = null;
   pendingEffects.clear();
@@ -370,7 +496,7 @@ watch(
         </span>
         <div>
           <span class="system-name">CODEX HALO / CONTROL ARRAY</span>
-          <h1>VIRTUAL DEVICE</h1>
+          <h1>CODEX HALO</h1>
         </div>
       </div>
 
@@ -385,23 +511,26 @@ watch(
         </div>
       </div>
 
-      <div
-        class="adapter-state"
-        :class="ADAPTER_CLASSES[store.state.adapterStatus.state]"
-        :data-adapter-state="store.state.adapterStatus.state"
-        :data-diagnostic-tone="adapterDiagnosticTone"
-        :aria-label="adapterDiagnosticLabel"
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-        :title="store.state.adapterStatus.message ?? undefined"
-      >
-        <i aria-hidden="true" />
-        <span>
-          <small>ADAPTER</small>
-          <strong>{{ ADAPTER_LABELS[store.state.adapterStatus.state] }}</strong>
-        </span>
-        <em>{{ store.state.adapterStatus.mode.toUpperCase() }}</em>
+      <div class="status-cluster">
+        <DeviceStatusView :status="store.state.deviceStatus" />
+        <div
+          class="adapter-state"
+          :class="ADAPTER_CLASSES[store.state.adapterStatus.state]"
+          :data-adapter-state="store.state.adapterStatus.state"
+          :data-diagnostic-tone="adapterDiagnosticTone"
+          :aria-label="adapterDiagnosticLabel"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          :title="store.state.adapterStatus.message ?? undefined"
+        >
+          <i aria-hidden="true" />
+          <span>
+            <small>ADAPTER</small>
+            <strong>{{ ADAPTER_LABELS[store.state.adapterStatus.state] }}</strong>
+          </span>
+          <em>{{ store.state.adapterStatus.mode.toUpperCase() }}</em>
+        </div>
       </div>
     </header>
 
@@ -431,7 +560,6 @@ watch(
         :queue="queue"
         :selected-slot="selectedSlot"
         :now-ms="renderedAtMs"
-        @select="selectSlot"
         @select-task="selectTask"
         @dragstart="beginDrag"
         @dragend="clearActiveDrag"

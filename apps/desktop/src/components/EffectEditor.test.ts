@@ -3,6 +3,7 @@ import { nextTick, reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AdapterStatus,
+  DeviceStatus,
   EffectProfile,
   HaloSnapshot,
   RingSlot,
@@ -13,6 +14,8 @@ const {
   createHaloStoreMock,
   loadMock,
   refreshAdapterStatusMock,
+  refreshDeviceStatusMock,
+  setPresentationMock,
   startMock,
   stopMock,
   setGlobalBrightnessMock,
@@ -29,6 +32,14 @@ const {
       ignoredEvents: 0,
       rejectedEvents: 0,
     } as AdapterStatus,
+    deviceStatus: {
+      revision: 1,
+      state: "virtual",
+      transport: "simulator",
+      message: null,
+      firmwareVersion: "0.1.0",
+      retryCount: 0,
+    } as DeviceStatus,
     loading: false,
     error: null as { operation: string; code: string; message: string } | null,
   };
@@ -37,6 +48,8 @@ const {
     createHaloStoreMock: vi.fn(),
     loadMock: vi.fn(() => Promise.resolve()),
     refreshAdapterStatusMock: vi.fn(() => Promise.resolve()),
+    refreshDeviceStatusMock: vi.fn(() => Promise.resolve()),
+    setPresentationMock: vi.fn(),
     startMock: vi.fn(() => Promise.resolve(true)),
     stopMock: vi.fn(() => Promise.resolve()),
     setGlobalBrightnessMock: vi.fn(),
@@ -88,10 +101,13 @@ function slot(
 function snapshot(
   globalBrightness = 80,
   effect: EffectProfile = DEFAULT_EFFECT,
+  selectedSlot: number | null = null,
 ): HaloSnapshot {
   return {
     revision: 1,
     deviceMode: "virtual",
+    displayMode: "ambient",
+    selectedSlot,
     globalBrightness,
     slots: Array.from({ length: 4 }, (_, index) =>
       slot(index, index === 0 ? effect : DEFAULT_EFFECT),
@@ -147,6 +163,8 @@ describe("EffectEditor", () => {
     for (const mock of [
       loadMock,
       refreshAdapterStatusMock,
+      refreshDeviceStatusMock,
+      setPresentationMock,
       startMock,
       stopMock,
       setGlobalBrightnessMock,
@@ -156,10 +174,19 @@ describe("EffectEditor", () => {
     }
     loadMock.mockResolvedValue(undefined);
     refreshAdapterStatusMock.mockResolvedValue(undefined);
+    refreshDeviceStatusMock.mockResolvedValue(undefined);
     startMock.mockResolvedValue(true);
     stopMock.mockResolvedValue(undefined);
 
     mountedState = reactive(fakeState);
+    setPresentationMock.mockImplementation(async (input) => {
+      mountedState.snapshot = {
+        ...mountedState.snapshot!,
+        revision: mountedState.snapshot!.revision + 1,
+        ...input,
+      };
+      return mountedState.snapshot;
+    });
     setGlobalBrightnessMock.mockImplementation(async (value: number) => {
       mountedState.snapshot = {
         ...mountedState.snapshot!,
@@ -175,6 +202,8 @@ describe("EffectEditor", () => {
       state: mountedState,
       load: loadMock,
       refreshAdapterStatus: refreshAdapterStatusMock,
+      refreshDeviceStatus: refreshDeviceStatusMock,
+      setPresentation: setPresentationMock,
       start: startMock,
       stop: stopMock,
       manualBind: vi.fn(),
@@ -363,7 +392,7 @@ describe("EffectEditor", () => {
     expect(updateEffectMock).toHaveBeenCalledTimes(1);
 
     first.resolve(
-      replaceEffect(snapshot(), {
+      replaceEffect(snapshot(80, DEFAULT_EFFECT, 0), {
         slot: 0,
         ...DEFAULT_EFFECT,
         speedPercent: 150,
@@ -382,7 +411,7 @@ describe("EffectEditor", () => {
     ).toBe("250");
 
     second.resolve(
-      replaceEffect(snapshot(), {
+      replaceEffect(snapshot(80, DEFAULT_EFFECT, 0), {
         slot: 0,
         ...DEFAULT_EFFECT,
         speedPercent: 250,
