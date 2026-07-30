@@ -1,13 +1,24 @@
 use crate::device::protocol::ProtocolError;
 use serde::Serialize;
+use std::fmt;
 
 const VIRTUAL_ENDPOINT_ID: &str = "codex-halo-simulator";
 const VIRTUAL_ENDPOINT_LABEL: &str = "Codex Halo Simulator";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Endpoint {
     pub id: String,
     pub label: String,
+}
+
+impl fmt::Debug for Endpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Endpoint")
+            .field("id", &"<redacted>")
+            .field("label", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Endpoint {
@@ -31,6 +42,11 @@ pub enum TransportError {
     EndpointNotFound,
     Disconnected,
     Timeout,
+    InvalidConfiguration,
+    DiscoveryFailed,
+    ConnectionFailed,
+    ReadFailed,
+    WriteFailed,
     InvalidKnobDelta,
     Protocol(ProtocolError),
 }
