@@ -198,6 +198,10 @@ void test_crc_error_is_reported_and_following_frame_decodes() {
   TEST_ASSERT_FALSE(decoded[0].ok());
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(halo::ProtocolError::CrcMismatch),
                           static_cast<uint8_t>(decoded[0].error));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(halo::MessageType::Hello),
+                          decoded[0].context.rawMessageType);
+  TEST_ASSERT_EQUAL_UINT16(1, decoded[0].context.sequence);
+  TEST_ASSERT_FALSE(decoded[0].context.respondable);
   assertFrame(decoded[1], halo::MessageType::Heartbeat, 2, {});
 }
 
@@ -206,12 +210,17 @@ void test_oversized_length_is_rejected_without_buffer_growth() {
   auto bytes = fromHex("4348010101000102");
   bytes.insert(bytes.end(), heartbeat.begin(), heartbeat.end());
 
-  halo::Decoder decoder;
+  halo::Decoder decoder{halo::DecoderMode::StrictV01};
   const auto decoded = decoder.push(bytes.data(), bytes.size());
   TEST_ASSERT_EQUAL_UINT32(2, decoded.size());
   TEST_ASSERT_EQUAL_UINT8(
       static_cast<uint8_t>(halo::ProtocolError::PayloadTooLarge),
       static_cast<uint8_t>(decoded[0].error));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(halo::MessageType::Hello),
+                          decoded[0].context.rawMessageType);
+  TEST_ASSERT_EQUAL_UINT16(1, decoded[0].context.sequence);
+  TEST_ASSERT_EQUAL_UINT16(513, decoded[0].context.declaredPayloadLength);
+  TEST_ASSERT_TRUE(decoded[0].context.respondable);
   assertFrame(decoded[1], halo::MessageType::Heartbeat, 2, {});
   TEST_ASSERT_LESS_OR_EQUAL_UINT32(halo::kMaxPayload + 10,
                                    decoder.bufferedSize());
@@ -222,12 +231,15 @@ void test_unknown_message_type_is_structured_and_recoverable() {
   auto bytes = fromHex("434801ff03000000");
   bytes.insert(bytes.end(), heartbeat.begin(), heartbeat.end());
 
-  halo::Decoder decoder;
+  halo::Decoder decoder{halo::DecoderMode::StrictV01};
   const auto decoded = decoder.push(bytes.data(), bytes.size());
   TEST_ASSERT_EQUAL_UINT32(2, decoded.size());
   TEST_ASSERT_EQUAL_UINT8(
       static_cast<uint8_t>(halo::ProtocolError::UnknownMessageType),
       static_cast<uint8_t>(decoded[0].error));
+  TEST_ASSERT_EQUAL_UINT8(0xff, decoded[0].context.rawMessageType);
+  TEST_ASSERT_EQUAL_UINT16(3, decoded[0].context.sequence);
+  TEST_ASSERT_TRUE(decoded[0].context.respondable);
   assertFrame(decoded[1], halo::MessageType::Heartbeat, 2, {});
 }
 
@@ -242,6 +254,11 @@ void test_unknown_version_is_structured_and_recoverable() {
   TEST_ASSERT_EQUAL_UINT8(
       static_cast<uint8_t>(halo::ProtocolError::UnsupportedVersion),
       static_cast<uint8_t>(decoded[0].error));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(halo::MessageType::Heartbeat),
+                          decoded[0].context.rawMessageType);
+  TEST_ASSERT_EQUAL_UINT16(2, decoded[0].context.sequence);
+  TEST_ASSERT_EQUAL_UINT8(2, decoded[0].context.protocolMajor);
+  TEST_ASSERT_FALSE(decoded[0].context.respondable);
   assertFrame(decoded[1], halo::MessageType::Heartbeat, 2, {});
 }
 
@@ -301,10 +318,27 @@ void test_oversized_encode_returns_no_frame() {
 void test_false_max_length_magic_inside_bad_frame_does_not_stall_recovery() {
   const auto heartbeat = loadGoldenVectors().at("heartbeat").frame;
   const auto falseHeader = fromHex("4348012000000002");
-  halo::Frame bad{halo::MessageType::Diagnostics, 9, falseHeader};
+  halo::Frame bad{halo::MessageType::RingUpdate, 9, falseHeader};
   auto bytes = halo::encode(bad);
   bytes.back() ^= 0xff;
   bytes.insert(bytes.end(), heartbeat.begin(), heartbeat.end());
+
+  halo::Decoder decoder{halo::DecoderMode::StrictV01};
+  const auto decoded = decoder.push(bytes.data(), bytes.size());
+  TEST_ASSERT_EQUAL_UINT32(3, decoded.size());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(halo::ProtocolError::CrcMismatch),
+                          static_cast<uint8_t>(decoded[0].error));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(halo::ProtocolError::InvalidPayloadLength),
+      static_cast<uint8_t>(decoded[1].error));
+  assertFrame(decoded[2], halo::MessageType::Heartbeat, 2, {});
+}
+
+void test_crc_error_resynchronizes_to_magic_inside_bad_frame() {
+  const auto heartbeat = loadGoldenVectors().at("heartbeat").frame;
+  halo::Frame bad{halo::MessageType::Diagnostics, 23, heartbeat};
+  auto bytes = halo::encode(bad);
+  bytes.back() ^= 0xff;
 
   halo::Decoder decoder;
   const auto decoded = decoder.push(bytes.data(), bytes.size());
@@ -312,6 +346,39 @@ void test_false_max_length_magic_inside_bad_frame_does_not_stall_recovery() {
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(halo::ProtocolError::CrcMismatch),
                           static_cast<uint8_t>(decoded[0].error));
   assertFrame(decoded[1], halo::MessageType::Heartbeat, 2, {});
+}
+
+void test_incomplete_max_length_candidate_recovers_to_complete_nested_frame() {
+  const auto heartbeat = loadGoldenVectors().at("heartbeat").frame;
+  auto bytes = fromHex("434801200900ff01");
+  bytes.insert(bytes.end(), heartbeat.begin(), heartbeat.end());
+
+  halo::Decoder decoder{halo::DecoderMode::StrictV01};
+  const auto decoded = decoder.push(bytes.data(), bytes.size());
+  TEST_ASSERT_EQUAL_UINT32(2, decoded.size());
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(halo::ProtocolError::InvalidPayloadLength),
+      static_cast<uint8_t>(decoded[0].error));
+  TEST_ASSERT_TRUE(decoded[0].context.respondable);
+  assertFrame(decoded[1], halo::MessageType::Heartbeat, 2, {});
+}
+
+void test_generic_decoder_retains_max_frame_with_nested_valid_frame_bytes() {
+  const auto heartbeat = loadGoldenVectors().at("heartbeat").frame;
+  std::vector<uint8_t> payload(halo::kMaxPayload, 0xa5);
+  std::copy(heartbeat.begin(), heartbeat.end(), payload.begin());
+  const halo::Frame frame{halo::MessageType::Diagnostics, 24, payload};
+  const auto encoded = halo::encode(frame);
+  const size_t prefixLength = 8 + heartbeat.size();
+
+  halo::Decoder decoder;
+  TEST_ASSERT_TRUE(decoder.push(encoded.data(), prefixLength).empty());
+  TEST_ASSERT_EQUAL_UINT32(prefixLength, decoder.bufferedSize());
+
+  const auto decoded = decoder.push(encoded.data() + prefixLength,
+                                     encoded.size() - prefixLength);
+  TEST_ASSERT_EQUAL_UINT32(1, decoded.size());
+  assertFrame(decoded[0], frame.type, frame.sequence, frame.payload);
 }
 
 }  // namespace
@@ -333,5 +400,8 @@ int main(int, char**) {
   RUN_TEST(test_maximum_payload_round_trips);
   RUN_TEST(test_oversized_encode_returns_no_frame);
   RUN_TEST(test_false_max_length_magic_inside_bad_frame_does_not_stall_recovery);
+  RUN_TEST(test_crc_error_resynchronizes_to_magic_inside_bad_frame);
+  RUN_TEST(test_incomplete_max_length_candidate_recovers_to_complete_nested_frame);
+  RUN_TEST(test_generic_decoder_retains_max_frame_with_nested_valid_frame_bytes);
   return UNITY_END();
 }

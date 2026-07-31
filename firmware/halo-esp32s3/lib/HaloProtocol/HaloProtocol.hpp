@@ -30,7 +30,13 @@ enum class ProtocolError : uint8_t {
   UnsupportedVersion,
   UnknownMessageType,
   PayloadTooLarge,
+  InvalidPayloadLength,
   CrcMismatch,
+};
+
+enum class DecoderMode : uint8_t {
+  Generic,
+  StrictV01,
 };
 
 struct Frame {
@@ -39,9 +45,18 @@ struct Frame {
   std::vector<uint8_t> payload;
 };
 
+struct DecodeErrorContext {
+  uint8_t protocolMajor{0};
+  uint8_t rawMessageType{0};
+  uint16_t sequence{0};
+  uint16_t declaredPayloadLength{0};
+  bool respondable{false};
+};
+
 struct DecodeResult {
   Frame frame;
   ProtocolError error{ProtocolError::None};
+  DecodeErrorContext context;
 
   bool ok() const { return error == ProtocolError::None; }
 };
@@ -52,6 +67,8 @@ std::vector<uint8_t> encode(const Frame& frame);
 class Decoder {
  public:
   static constexpr size_t kBufferCapacity = kMaxPayload + 10;
+
+  explicit Decoder(DecoderMode mode = DecoderMode::Generic) : mode_(mode) {}
 
   std::vector<DecodeResult> push(const uint8_t* bytes, size_t length);
 
@@ -66,6 +83,7 @@ class Decoder {
 
   std::array<uint8_t, kBufferCapacity> buffer_{};
   size_t used_{0};
+  DecoderMode mode_{DecoderMode::Generic};
 };
 
 }  // namespace halo

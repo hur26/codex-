@@ -27,6 +27,31 @@ bool isKnownMessageType(uint8_t value) {
   }
 }
 
+size_t expectedV01PayloadLength(uint8_t value) {
+  switch (static_cast<MessageType>(value)) {
+    case MessageType::Hello:
+    case MessageType::Ack:
+    case MessageType::Brightness:
+      return 1;
+    case MessageType::Capabilities:
+      return 9;
+    case MessageType::FullSnapshot:
+      return 44;
+    case MessageType::RingUpdate:
+      return 8;
+    case MessageType::DisplayMode:
+    case MessageType::Nack:
+    case MessageType::KnobEvent:
+      return 2;
+    case MessageType::Heartbeat:
+      return 0;
+    case MessageType::Diagnostics:
+      return 7;
+  }
+
+  return kMaxPayload + 1;
+}
+
 uint16_t readUint16Le(const uint8_t* bytes) {
   return static_cast<uint16_t>(bytes[0]) |
          static_cast<uint16_t>(static_cast<uint16_t>(bytes[1]) << 8);
@@ -37,9 +62,10 @@ void appendUint16Le(std::vector<uint8_t>& bytes, uint16_t value) {
   bytes.push_back(static_cast<uint8_t>(value >> 8));
 }
 
-DecodeResult failure(ProtocolError error) {
+DecodeResult failure(ProtocolError error, DecodeErrorContext context) {
   DecodeResult result;
   result.error = error;
+  result.context = context;
   return result;
 }
 
@@ -116,21 +142,35 @@ void Decoder::pushByte(uint8_t byte) {
 
 void Decoder::decodeReady(std::vector<DecodeResult>& decoded) {
   while (used_ >= kHeaderBytes) {
-    const size_t payloadLength = readUint16Le(buffer_.data() + 6);
-    if (payloadLength > kMaxPayload) {
-      decoded.push_back(failure(ProtocolError::PayloadTooLarge));
+    const uint16_t payloadLength = readUint16Le(buffer_.data() + 6);
+    DecodeErrorContext context{buffer_[2], buffer_[3],
+                               readUint16Le(buffer_.data() + 4), payloadLength,
+                               false};
+
+    if (buffer_[2] != kProtocolMajor) {
+      decoded.push_back(failure(ProtocolError::UnsupportedVersion, context));
       resynchronize();
       continue;
     }
 
-    if (buffer_[2] != kProtocolMajor) {
-      decoded.push_back(failure(ProtocolError::UnsupportedVersion));
+    if (payloadLength > kMaxPayload) {
+      context.respondable = true;
+      decoded.push_back(failure(ProtocolError::PayloadTooLarge, context));
       resynchronize();
       continue;
     }
 
     if (!isKnownMessageType(buffer_[3])) {
-      decoded.push_back(failure(ProtocolError::UnknownMessageType));
+      context.respondable = true;
+      decoded.push_back(failure(ProtocolError::UnknownMessageType, context));
+      resynchronize();
+      continue;
+    }
+
+    if (mode_ == DecoderMode::StrictV01 &&
+        payloadLength != expectedV01PayloadLength(buffer_[3])) {
+      context.respondable = true;
+      decoded.push_back(failure(ProtocolError::InvalidPayloadLength, context));
       resynchronize();
       continue;
     }
@@ -145,8 +185,8 @@ void Decoder::decodeReady(std::vector<DecodeResult>& decoded) {
     const uint16_t actualCrc = crc16CcittFalse(
         buffer_.data() + kMagic.size(), frameLength - kMagic.size() - kCrcBytes);
     if (actualCrc != expectedCrc) {
-      decoded.push_back(failure(ProtocolError::CrcMismatch));
-      discardPrefix(frameLength);
+      decoded.push_back(failure(ProtocolError::CrcMismatch, context));
+      resynchronize();
       continue;
     }
 
@@ -155,6 +195,8 @@ void Decoder::decodeReady(std::vector<DecodeResult>& decoded) {
     result.frame.sequence = readUint16Le(buffer_.data() + 4);
     result.frame.payload.assign(buffer_.begin() + kHeaderBytes,
                                 buffer_.begin() + kHeaderBytes + payloadLength);
+    context.respondable = true;
+    result.context = context;
     decoded.push_back(std::move(result));
     discardPrefix(frameLength);
   }
