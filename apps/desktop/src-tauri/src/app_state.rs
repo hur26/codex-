@@ -281,35 +281,52 @@ fn run_device_manager<R: Runtime, T: DeviceTransport>(
 ) {
     let timer = DeviceWorkerTimer::start();
     while !stop.load(Ordering::Acquire) {
-        let snapshot = match engine.lock() {
-            Ok(engine) => engine.snapshot(),
-            Err(_) => {
-                let status = DeviceStatus {
-                    revision: 0,
-                    state: DeviceConnectionState::Error,
-                    transport: manager.status().transport,
-                    message: Some("Virtual device state is unavailable".to_owned()),
-                    firmware_version: None,
-                    retry_count: manager.status().retry_count,
-                };
-                publish_device_status(&device_status, status, |status| {
-                    let _ = app_handle.emit("halo://device-status", status);
-                });
-                park_device_worker(&stop);
-                continue;
-            }
-        };
-
-        let result = manager.step(timer.elapsed_ms(), &snapshot);
-        publish_device_status(&device_status, manager.status().clone(), |status| {
-            let _ = app_handle.emit("halo://device-status", status);
-        });
-
-        if let Some(snapshot) = apply_device_intents(&engine, result.intents) {
-            let _ = app_handle.emit("halo://snapshot", snapshot);
-        }
+        run_device_manager_iteration(
+            &engine,
+            &device_status,
+            &mut manager,
+            timer.elapsed_ms(),
+            |status| {
+                let _ = app_handle.emit("halo://device-status", status);
+            },
+            |snapshot| {
+                let _ = app_handle.emit("halo://snapshot", snapshot);
+            },
+        );
 
         park_device_worker(&stop);
+    }
+}
+
+fn run_device_manager_iteration<T: DeviceTransport>(
+    engine: &Mutex<HaloEngine>,
+    device_status: &Mutex<DeviceStatus>,
+    manager: &mut DeviceManager<T>,
+    now_ms: u64,
+    emit_device_status: impl FnOnce(DeviceStatus),
+    emit_snapshot: impl FnOnce(HaloSnapshot),
+) {
+    let snapshot = match engine.lock() {
+        Ok(engine) => engine.snapshot(),
+        Err(_) => {
+            let status = DeviceStatus {
+                revision: 0,
+                state: DeviceConnectionState::Error,
+                transport: manager.status().transport,
+                message: Some("Virtual device state is unavailable".to_owned()),
+                firmware_version: None,
+                retry_count: manager.status().retry_count,
+            };
+            publish_device_status(device_status, status, emit_device_status);
+            return;
+        }
+    };
+
+    let result = manager.step(now_ms, &snapshot);
+    publish_device_status(device_status, manager.status().clone(), emit_device_status);
+
+    if let Some(snapshot) = apply_device_intents(engine, result.intents) {
+        emit_snapshot(snapshot);
     }
 }
 
@@ -412,6 +429,7 @@ fn unix_time_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::device::manager::{DeviceConnectionState, DeviceStatus};
+    use crate::device::simulator::Fault;
     use crate::device::transport::TransportKind;
     use crate::domain::model::{
         Confidence, DisplayMode, NormalizedState, PresentationIntent, SignalSource, TaskKey,
@@ -584,6 +602,73 @@ mod tests {
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].revision, 1);
         assert_eq!(shared.lock().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn device_worker_iteration_survives_crc_error_and_continues_syncing() {
+        let engine = Mutex::new(HaloEngine::new(ROUND_COMPLETE_HOLD_MS));
+        let device_status = Mutex::new(safe_device_status());
+        let mut manager = DeviceManager::new(SimulatedTransport::default());
+        let mut emitted_statuses = Vec::new();
+        let mut emitted_snapshots = Vec::new();
+
+        run_device_manager_iteration(
+            &engine,
+            &device_status,
+            &mut manager,
+            0,
+            |status| {
+                assert!(device_status.try_lock().is_ok());
+                emitted_statuses.push(status);
+            },
+            |snapshot| {
+                assert!(engine.try_lock().is_ok());
+                emitted_snapshots.push(snapshot);
+            },
+        );
+        assert_eq!(manager.status().state, DeviceConnectionState::Virtual);
+
+        manager.transport_mut().script(Fault::CorruptCrcOnce);
+        engine.lock().unwrap().set_global_brightness(50).unwrap();
+
+        let mut completed_iterations = 0;
+        for now_ms in [10, 259, 260, 261] {
+            run_device_manager_iteration(
+                &engine,
+                &device_status,
+                &mut manager,
+                now_ms,
+                |status| {
+                    assert!(device_status.try_lock().is_ok());
+                    emitted_statuses.push(status);
+                },
+                |snapshot| {
+                    assert!(engine.try_lock().is_ok());
+                    emitted_snapshots.push(snapshot);
+                },
+            );
+            completed_iterations += 1;
+        }
+
+        assert_eq!(completed_iterations, 4);
+        assert_eq!(manager.status().state, DeviceConnectionState::Virtual);
+        assert_eq!(
+            device_status.lock().unwrap().state,
+            DeviceConnectionState::Virtual
+        );
+        assert_eq!(
+            manager
+                .transport()
+                .applied_snapshot()
+                .expect("the recovered worker must apply the latest snapshot")
+                .global_brightness,
+            50
+        );
+        assert!(emitted_statuses
+            .iter()
+            .any(|status| status.retry_count == 1));
+        assert_eq!(emitted_statuses.last().unwrap().message, None);
+        assert!(emitted_snapshots.is_empty());
     }
 
     #[test]

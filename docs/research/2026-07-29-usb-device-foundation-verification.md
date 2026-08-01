@@ -11,7 +11,8 @@
 USB 设备基础计划的无硬件门禁全部通过。桌面端 Python、Vue/TypeScript、Rust，
 以及固件原生测试和 Waveshare ESP32-S3 编译均成功；协议级模拟设备覆盖了握手、
 脱敏快照、增量更新、旋钮事件、两次重试、断线重连、CRC 故障恢复和版本不兼容
-停写。Rust 与 C++ 测试读取同一份 4 条黄金 TSV，隐私扫描没有发现任务身份或
+停写。生产 worker 迭代还验证了 CRC 故障后继续同步。Rust 与 C++ 测试读取同一
+份 4 条黄金 TSV，隐私扫描没有发现任务身份或
 USB 序列号进入设备载荷、设备诊断或固件状态。
 
 这些结果只证明协议、状态机、模拟传输、UI 合约和目标固件能够在无硬件环境中
@@ -46,7 +47,7 @@ USB 序列号进入设备载荷、设备诊断或固件状态。
 | 2 | `npm test --prefix apps/desktop` | 0 | 12 个测试文件、154 项测试全部通过 |
 | 3 | `npm run typecheck --prefix apps/desktop` | 0 | `vue-tsc --noEmit` 通过 |
 | 4 | `npm run build --prefix apps/desktop` | 0 | 类型检查和 Vite production build 通过，转换 42 个模块 |
-| 5 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | 0 | Rust 126 项全部通过；main 和 doc tests 各 0 项 |
+| 5 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | 0 | Rust 127 项全部通过；main 和 doc tests 各 0 项 |
 | 6 | `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings` | 0 | 通过 |
 | 7 | `python -m platformio --version` | 0 | `PlatformIO Core, version 6.1.19` |
 | 8 | `python -m platformio test -e native` | 0 | 3 个测试组、38/38 通过：HAL 4、协议 18、状态 16 |
@@ -55,14 +56,16 @@ USB 序列号进入设备载荷、设备诊断或固件状态。
 第 7～9 项在 `firmware/halo-esp32s3` 下执行。Python 唯一跳过项是 Windows
 会话无法创建符号链接时主动跳过的 Hook 安装测试；其余安装器和路径安全测试
 均实际运行。Rust 测试日志中的 MSVC linker stdout 仅说明正在创建 import
-library；随后 126 项测试通过，且独立的 Clippy `-D warnings` 门禁为 0。
+library；随后 127 项测试通过，且独立的 Clippy `-D warnings` 门禁为 0。
 
 ## 十个模拟设备场景
 
-全量 Rust 门禁已经运行以下测试。本节另外执行了聚焦回归：manager 19/19、
-simulator 12/12、表冠模式/环绕 1/1、四圈脱敏投影 1/1，均为退出码 0。
+全量 Rust 门禁已经运行以下测试。本节另外执行了聚焦回归：worker CRC 1/1、
+manager 19/19、simulator 12/12、表冠模式/环绕 1/1、四圈脱敏投影 1/1，均为
+退出码 0。
 
 ```powershell
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml app_state::tests::device_worker_iteration_survives_crc_error_and_continues_syncing -- --exact --nocapture
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml device::manager::tests -- --nocapture
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml device::simulator::tests -- --nocapture
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml domain::engine::tests::presentation_intents_cycle_modes_and_wrap_ring_selection -- --exact --nocapture
@@ -74,12 +77,12 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml device::presentatio
 | 1 | 启动为 `VIRTUAL` | `manager_handshakes_then_sends_an_authoritative_full_snapshot` 断言 manager 为 `Virtual`；`App.test.ts` 和 `DeviceStatus.test.ts` 验证界面文案 `VIRTUAL` | 通过 |
 | 2 | HELLO/CAPABILITIES 握手 | `manager_handshakes_then_sends_an_authoritative_full_snapshot`；`simulator_handshakes_acks_state_and_records_the_snapshot` | 通过 |
 | 3 | 完整快照包含四圈且脱敏 | `projection_contains_four_ring_states_but_no_task_identity` 断言 4 圈、空 label，编码载荷不含测试 TaskKey | 通过 |
-| 4 | 单圈变化只发送单圈增量 | `delta_sends_only_changed_ring_or_global_fields` 只产生 R02（索引 2）更新；`simulator_applies_incremental_state_writes_and_acks_each_sequence` 验证应用与 ACK | 通过 |
+| 4 | 单圈变化只发送单圈增量 | `delta_sends_only_changed_ring_or_global_fields` 只产生 R03（索引 2）更新；`simulator_applies_incremental_state_writes_and_acks_each_sequence` 验证应用与 ACK | 通过 |
 | 5 | 旋钮短按改变显示模式 | `old_knob_sequences_are_ignored_and_new_events_become_intents` 把新短按转换为 intent；`presentation_intents_cycle_modes_and_wrap_ring_selection` 验证 `Ambient → Overview → Detail → Ambient` | 通过 |
 | 6 | 旋转选择在 0..3 环绕 | `presentation_intents_cycle_modes_and_wrap_ring_selection` 验证初始正转到 0、反转到 3，并验证反向首次选择 3 | 通过 |
 | 7 | 超时最多重试两次 | `manager_retries_twice_then_reconnects_with_a_full_snapshot` 明确断言 `retry_count == 2` 后重连 | 通过 |
 | 8 | 断线重连发送完整快照 | `every_new_connection_sends_a_full_snapshot` 断线前后完整快照计数从 1 增到 2，状态恢复 `Virtual` | 通过 |
-| 9 | CRC 错误不使 worker 崩溃 | `corrupt_crc_once_retries_after_timeout_and_applies_the_final_state` 注入一次坏 CRC，随后重试并应用最终亮度；manager 测试进程保持通过 | 通过 |
+| 9 | CRC 错误不使 worker 崩溃 | `device_worker_iteration_survives_crc_error_and_continues_syncing` 通过生产 `run_device_manager` 实际调用的单次迭代路径，在显式时点注入坏 CRC；5 次迭代均返回，锁外发布保持有效，最终状态为 `Virtual` 并同步亮度 50。manager 的 `corrupt_crc_once_retries_after_timeout_and_applies_the_final_state` 同时提供协议重试细节 | 通过 |
 | 10 | 主版本不兼容进入 `INCOMPATIBLE` 并停写 | `incompatible_major_never_receives_state_writes` 断言状态为 `Incompatible` 且 `state_write_count == 0`；能力不足路径也有同样停写断言 | 通过 |
 
 ## 故障注入
@@ -108,7 +111,7 @@ manager 聚焦测试 19/19 全部通过：
 
 - Rust `device::protocol::tests::encodes_and_decodes_all_published_golden_vectors`
   通过 `include_str!("../../../../../docs/protocol/golden-vectors.tsv")` 读取该文件，
-  在全量 126 项中通过；
+  在全量 127 项中通过；
 - C++ `test_all_shared_golden_vectors_encode_and_decode` 通过
   `std::ifstream("../../docs/protocol/golden-vectors.tsv")` 读取同一文件，在 native
   38 项中通过。
@@ -126,7 +129,7 @@ rg -n "taskKey|task_key|serial_number|serialNumber" `
   firmware/halo-esp32s3
 ```
 
-退出码为 0，共 6 处匹配；逐项解释如下：
+退出码为 0，共 7 行匹配；逐行解释如下：
 
 | 命中 | 解释 |
 |---|---|
@@ -134,10 +137,11 @@ rg -n "taskKey|task_key|serial_number|serialNumber" `
 | `manager.rs:1015 taskKey` | 负向断言：序列化设备状态不得包含 `taskKey` |
 | `manager.rs:1016 serialNumber` | 负向断言：序列化设备状态不得包含 `serialNumber` |
 | `presentation.rs:348 task_key: Some(...)` | 脱敏投影测试故意在领域夹具放入 TaskKey，随后断言设备载荷不含该值且所有 label 为空 |
-| `serial.rs:252/259 serial_number` | 测试帮助函数把虚构 USB 序列号放入第三方 `UsbPortInfo`，用于验证转换后的诊断和 Debug 输出会丢弃它；不是设备载荷或生产状态字段 |
+| `serial.rs:252 serial_number` | 测试帮助函数的可选参数，只用于构造含虚构 USB 序列号的第三方 `UsbPortInfo` 测试值 |
+| `serial.rs:259 serial_number` | 同一测试帮助函数把虚构值复制进第三方测试结构，随后转换为生产候选项以验证序列号被丢弃；不是设备载荷或生产状态字段 |
 | `serial.rs:371 diagnostics_never_expose_usb_serial_numbers` | 测试名称，断言敏感序列号不出现在诊断标签或 Debug 输出 |
 
-`docs/protocol` 和 `firmware/halo-esp32s3` 均无匹配。允许命中全部位于测试夹具、
+`docs/protocol` 和 `firmware/halo-esp32s3` 均无匹配。7 行允许命中全部位于测试夹具、
 测试名称或负向断言；设备协议载荷、设备状态、诊断输出和固件状态没有携带任务
 身份或 USB 序列号。协议同时固定空 label，未承载提示词、回复或代码内容。
 
@@ -157,7 +161,8 @@ rg -n "taskKey|task_key|serial_number|serialNumber" `
 
 无硬件可验证的完成定义已经满足：两端共享向量；半帧、噪声、CRC、超长和未知
 版本行为确定；模拟器覆盖握手、ACK/NACK、旋钮、超时和断线；每次新连接使用
-完整快照；UI 区分 Hook adapter 与 Halo device 状态；现有拖拽、绑定、灯效和
+完整快照；CRC 恢复通过生产 worker 迭代边界验证；UI 区分 Hook adapter 与
+Halo device 状态；现有拖拽、绑定、灯效和
 Hook 回归包含在 Python/Vitest/Rust 全量门禁中；BOM 与接线文档把首轮限制为
 一圈并保留安全供电边界。
 

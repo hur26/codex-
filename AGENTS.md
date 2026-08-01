@@ -55,17 +55,17 @@ $env:PATH = 'D:\DevTools\CLion 2026.1\bin\mingw\bin;' + $env:PATH
 ## Current Progress
 
 - Branch: `main`.
-- Latest completed task: Task 12 (`验证：记录 USB 设备基础无硬件门禁`). This handoff file is part of the Task 12 commit; use `git log -1` for its commit hash.
-- After the Task 12 commit, the branch is seven commits ahead of `origin/main`; do not claim that physical hardware is verified.
-- Tasks 1-12 are complete, independently reviewed where required, tested, and committed. The USB device foundation no-hardware phase is complete.
-- Task 12 desktop gates pass: Python 64 tests (63 passed, 1 Windows symlink skip), Vitest 154/154, TypeScript typecheck, Vite production build, Rust 126/126, and Clippy with `-D warnings`.
+- Latest completed task: Task 12 (`验证：记录 USB 设备基础无硬件门禁`), commit `3c6ad7e`, plus a follow-up worker CRC evidence fix. Use `git log -1` for the follow-up commit hash.
+- After the Task 12 follow-up commit, the branch is eight commits ahead of `origin/main`; do not claim that physical hardware is verified.
+- Tasks 1-12 are implemented, tested, and committed. The Task 12 specification review gaps are remediated; focused independent re-review is the next gate before push.
+- Task 12 desktop gates pass: Python 64 tests (63 passed, 1 Windows symlink skip), Vitest 154/154, TypeScript typecheck, Vite production build, Rust 127/127, and Clippy with `-D warnings`.
 - Task 12 firmware gates pass under `D:\DevTools\PlatformIO`: PlatformIO Core 6.1.19, Espressif32 7.0.1, native firmware tests 38/38, and `waveshare_amoled_143` target build SUCCESS.
-- The ten required simulated-device scenarios pass: VIRTUAL, handshake, four-ring sanitized snapshot, single-ring delta, short press, rotation wrap, exactly two retries, reconnect full snapshot, CRC recovery without worker failure, and INCOMPATIBLE without state writes.
+- The ten required simulated-device scenarios pass: VIRTUAL, handshake, four-ring sanitized snapshot, single-ring delta, short press, rotation wrap, exactly two retries, reconnect full snapshot, CRC recovery through the production worker iteration boundary, and INCOMPATIBLE without state writes.
 - Rust and C++ both consume the same four rows in `docs/protocol/golden-vectors.tsv`; their shared-vector tests pass.
-- The privacy scan has six allowed test-only/negative-assertion matches and no task identity or USB serial number in device payloads, device diagnostics, or firmware state.
+- The privacy scan has seven allowed test-only/negative-assertion matching lines and no task identity or USB serial number in device payloads, device diagnostics, or firmware state.
 - Firmware artifact: `firmware/halo-esp32s3/.pio/build/waveshare_amoled_143/firmware.bin`, 280656 bytes, SHA-256 `C8D728CEE43CE000B1EF3C04222C106158C756EC795D9C58FEEC88925C80C00C`.
 - No physical USB, AMOLED, LED ring, knob, power rail, signal level, thermal behavior, enclosure, or four-ring assembly has been verified. The next hardware step is only the minimum one-ring prototype kit from the BOM.
-- Next planned work: perform the overall final review, push `main`, send the user a concise Chinese development summary, and then prepare the minimum one-ring purchase/assembly session.
+- Next planned work: complete the focused specification re-review and code-quality review, perform the overall final review, push `main`, send the user a concise Chinese development summary, and then prepare the minimum one-ring purchase/assembly session.
 
 ## Previous Progress Snapshot
 
