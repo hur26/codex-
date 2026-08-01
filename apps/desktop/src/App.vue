@@ -500,7 +500,7 @@ watch(
         </div>
       </div>
 
-      <div class="header-readouts" aria-label="虚拟设备摘要">
+      <div class="header-readouts" aria-label="设备摘要">
         <div>
           <span>CHANNELS</span>
           <strong>{{ occupiedCount }} / 4</strong>
@@ -541,7 +541,7 @@ watch(
       role="status"
     >
       <i aria-hidden="true" />
-      正在同步虚拟设备快照
+      正在同步设备快照
     </div>
     <div
       v-if="visibleAppError"
@@ -565,7 +565,7 @@ watch(
         @dragend="clearActiveDrag"
       />
 
-      <section class="device-workspace" aria-label="虚拟设备工作区">
+      <section class="device-workspace" aria-label="设备工作区">
         <div class="workspace-axis axis-horizontal" aria-hidden="true" />
         <div class="workspace-axis axis-vertical" aria-hidden="true" />
 

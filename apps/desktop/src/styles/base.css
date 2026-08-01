@@ -132,6 +132,17 @@ body {
   white-space: nowrap;
 }
 
+.device-status-message {
+  display: block;
+  overflow: hidden;
+  max-width: 10rem;
+  color: var(--halo-text-muted);
+  font-size: 0.46rem;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .device-status-meta {
   display: grid;
   margin-left: auto;

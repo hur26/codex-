@@ -12,6 +12,25 @@ const BASE_STATUS: DeviceStatus = {
   retryCount: 0,
 };
 
+const SAFE_DIAGNOSTICS = [
+  "Device endpoint was not found",
+  "Device discovery failed",
+  "Device connection failed",
+  "Protocol major is incompatible",
+  "Device read failed",
+  "Device capabilities are incompatible",
+  "Device rejected state update",
+  "Device snapshot was invalid",
+  "Device update was invalid",
+  "Device frame could not be encoded",
+  "Device write failed",
+  "Device response timed out",
+  "Device retry failed",
+  "Device heartbeat failed",
+  "Device worker could not start",
+  "Virtual device state is unavailable",
+] as const;
+
 describe("DeviceStatus", () => {
   it.each([
     ["virtual", "VIRTUAL"],
@@ -37,6 +56,85 @@ describe("DeviceStatus", () => {
 
     expect(wrapper.get("[data-device-status]").classes()).toContain(
       "device-status-incompatible",
+    );
+  });
+
+  it("shows a known safe diagnostic message visibly and accessibly", () => {
+    const wrapper = mount(DeviceStatusView, {
+      props: {
+        status: {
+          ...BASE_STATUS,
+          state: "incompatible",
+          transport: "serial",
+          message: "Protocol major is incompatible",
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-device-message]").text()).toBe(
+      "Protocol major is incompatible",
+    );
+    expect(wrapper.get("[data-device-status]").attributes("aria-label")).toContain(
+      "Protocol major is incompatible",
+    );
+    expect(wrapper.get("[data-device-status]").attributes("title")).toBe(
+      "Protocol major is incompatible",
+    );
+  });
+
+  it.each(SAFE_DIAGNOSTICS)(
+    "allows the fixed Rust diagnostic: %s",
+    (message) => {
+      const wrapper = mount(DeviceStatusView, {
+        props: {
+          status: { ...BASE_STATUS, state: "error", message },
+        },
+      });
+
+      expect(wrapper.get("[data-device-message]").text()).toBe(message);
+    },
+  );
+
+  it.each([
+    ["bare task key", "0123456789abcdef"],
+    ["prompt body", "请重写用户的支付提示词正文"],
+    ["Windows port", "COM77"],
+    ["Unix port", "/dev/ttyUSB0"],
+    ["arbitrary USB serial", "SN9X7K2Q4M8P"],
+    ["raw frame hex", "4348010b0700a1b2c3d4e5f6c7d8"],
+  ])("hides unknown %s diagnostics", (_kind, message) => {
+    const wrapper = mount(DeviceStatusView, {
+      props: {
+        status: {
+          ...BASE_STATUS,
+          state: "error",
+          transport: "serial",
+          message,
+        },
+      },
+    });
+
+    expect(wrapper.html()).not.toContain(message);
+    expect(wrapper.get("[data-device-message]").text()).toBe(
+      "设备诊断信息已隐藏",
+    );
+    expect(wrapper.get("[data-device-status]").attributes("title")).toBe(
+      "设备诊断信息已隐藏",
+    );
+    expect(wrapper.get("[data-device-status]").attributes("aria-label")).not.toContain(
+      message,
+    );
+  });
+
+  it("does not render message chrome or accessible noise for an empty message", () => {
+    const wrapper = mount(DeviceStatusView, {
+      props: { status: { ...BASE_STATUS, message: "   " } },
+    });
+
+    expect(wrapper.find("[data-device-message]").exists()).toBe(false);
+    expect(wrapper.get("[data-device-status]").attributes("title")).toBeUndefined();
+    expect(wrapper.get("[data-device-status]").attributes("aria-label")).toBe(
+      "Device VIRTUAL, simulator",
     );
   });
 

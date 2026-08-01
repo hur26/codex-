@@ -45,7 +45,7 @@ USB 序列号进入设备载荷、设备诊断或固件状态。
 | # | 命令 | 退出码 | 结果 |
 |---:|---|---:|---|
 | 1 | `python -m unittest discover -s tests -p 'test_*.py'` | 0 | 64 项运行：63 通过、1 跳过；耗时 6.642 s |
-| 2 | `npm test --prefix apps/desktop` | 0 | 12 个测试文件、154 项测试全部通过 |
+| 2 | `npm test --prefix apps/desktop` | 0 | 12 个测试文件、180 项测试全部通过 |
 | 3 | `npm run typecheck --prefix apps/desktop` | 0 | `vue-tsc --noEmit` 通过 |
 | 4 | `npm run build --prefix apps/desktop` | 0 | 类型检查和 Vite production build 通过，转换 42 个模块 |
 | 5 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | 0 | Rust 132 项全部通过；main 和 doc tests 各 0 项 |
@@ -216,3 +216,11 @@ worker 边界 CRC 证据，因此从生产 `run_device_manager` 提取并复用�
 `push` 产生伪版本错误的问题；两端现会逐帧消耗成功结果，并把剩余噪声归一为
 空缓冲或单字节半魔数。该修复没有增加任何
 实体硬件验证结论。
+
+界面复查还发现串口在线时的部分文案仍写成“虚拟设备”，且设备状态消息原本既不
+显示，也没有进入无障碍名称。修复后文案改为 transport-neutral 的“设备”，固定
+安全消息可见且可访问；前端只允许 Rust 生产路径当前使用的 16 条固定脱敏文案，
+未知非空文本统一显示“设备诊断信息已隐藏”，空白文本不增加视觉或无障碍噪音。
+新增测试分别覆盖裸任务指纹、提示词、Windows/Unix 串口、任意 USB 序列号和原始
+帧十六进制，前端全量 180/180、类型检查和生产构建均通过。该修复通过独立规格与
+代码质量审查。

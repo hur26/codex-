@@ -261,6 +261,32 @@ describe("App control center", () => {
     expect(wrapper.get("[data-queue-task]").text()).toContain("QUEUE 01");
   });
 
+  it.each([
+    ["simulator", "virtual"],
+    ["serial", "online"],
+  ] as const)(
+    "%s transport 使用不误导实体设备状态的通用界面文案",
+    (transport, state) => {
+      fakeState.deviceStatus = {
+        ...fakeState.deviceStatus,
+        transport,
+        state,
+      };
+      fakeState.loading = true;
+      const wrapper = mount(App);
+
+      expect(wrapper.get(".header-readouts").attributes("aria-label")).toBe(
+        "设备摘要",
+      );
+      expect(wrapper.get("[data-loading]").text()).toContain(
+        "正在同步设备快照",
+      );
+      expect(wrapper.get(".device-workspace").attributes("aria-label")).toBe(
+        "设备工作区",
+      );
+    },
+  );
+
   it("routes ring and crown presentation through the authoritative store", async () => {
     const wrapper = mount(App);
     const preview = wrapper.findComponent(HaloPreview);
