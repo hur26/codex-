@@ -55,17 +55,17 @@ $env:PATH = 'D:\DevTools\CLion 2026.1\bin\mingw\bin;' + $env:PATH
 ## Current Progress
 
 - Branch: `main`.
-- Latest committed task: Task 10 (`固件：实现设备状态机与安全适配层`), commit `abe853f`.
-- The branch is five commits ahead of `origin/main`; do not push until Task 12 and all final gates pass.
-- Tasks 1-10 are implemented, independently reviewed, tested, and committed. Task 11 is implemented, acceptance-checked, and independently approved, but remains uncommitted because the current permission profile makes `.git` read-only.
-- Task 11 adds a minimum one-ring purchase BOM, a separately marked four-ring estimate, and a pre-power wiring and power checklist; no price, stock, or physical-hardware validation is claimed.
-- Task 11 hardware boundaries require power-off wiring, explicit shared-ground and independent-rail power sequencing, no-load voltage and polarity checks, external current-limited 5 V LED power, a 330-470 ohm data resistor, a correctly polarized 500-1000 uF capacitor, and a deterministic AHCT125-class buffer topology with fixed enable and an approximately 10 kΩ data-input pull-down.
-- Task 11 keeps firmware limits at `maxMilliAmps=500` and 30% brightness, states that software limits do not replace external current limiting, prevents unverified external-5 V backfeed into the board, and requires immediate power-off on restart, flicker, heat, polarity, or abnormal-current symptoms.
-- Task 11 independent specification review: PASS.
-- Task 11 independent code-quality and hardware-safety review: APPROVE.
-- Task 11 documentation gates pass: all planned safety terms are present, both README link pairs resolve to the hardware documents, and `git diff --check` passes.
-- Next planned work: restore `.git` write access, commit Task 11, then run Task 12 full no-hardware end-to-end gates and verification report.
-- After Task 12 passes, push `main` and send the user a concise Chinese development summary.
+- Latest completed task: Task 12 (`验证：记录 USB 设备基础无硬件门禁`). This handoff file is part of the Task 12 commit; use `git log -1` for its commit hash.
+- After the Task 12 commit, the branch is seven commits ahead of `origin/main`; do not claim that physical hardware is verified.
+- Tasks 1-12 are complete, independently reviewed where required, tested, and committed. The USB device foundation no-hardware phase is complete.
+- Task 12 desktop gates pass: Python 64 tests (63 passed, 1 Windows symlink skip), Vitest 154/154, TypeScript typecheck, Vite production build, Rust 126/126, and Clippy with `-D warnings`.
+- Task 12 firmware gates pass under `D:\DevTools\PlatformIO`: PlatformIO Core 6.1.19, Espressif32 7.0.1, native firmware tests 38/38, and `waveshare_amoled_143` target build SUCCESS.
+- The ten required simulated-device scenarios pass: VIRTUAL, handshake, four-ring sanitized snapshot, single-ring delta, short press, rotation wrap, exactly two retries, reconnect full snapshot, CRC recovery without worker failure, and INCOMPATIBLE without state writes.
+- Rust and C++ both consume the same four rows in `docs/protocol/golden-vectors.tsv`; their shared-vector tests pass.
+- The privacy scan has six allowed test-only/negative-assertion matches and no task identity or USB serial number in device payloads, device diagnostics, or firmware state.
+- Firmware artifact: `firmware/halo-esp32s3/.pio/build/waveshare_amoled_143/firmware.bin`, 280656 bytes, SHA-256 `C8D728CEE43CE000B1EF3C04222C106158C756EC795D9C58FEEC88925C80C00C`.
+- No physical USB, AMOLED, LED ring, knob, power rail, signal level, thermal behavior, enclosure, or four-ring assembly has been verified. The next hardware step is only the minimum one-ring prototype kit from the BOM.
+- Next planned work: perform the overall final review, push `main`, send the user a concise Chinese development summary, and then prepare the minimum one-ring purchase/assembly session.
 
 ## Previous Progress Snapshot
 
