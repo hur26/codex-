@@ -55,8 +55,8 @@ $env:PATH = 'D:\DevTools\CLion 2026.1\bin\mingw\bin;' + $env:PATH
 ## Current Progress
 
 - Branch: `main`.
-- Latest completed task: Task 12 (`验证：记录 USB 设备基础无硬件门禁`), commit `3c6ad7e`, plus a follow-up worker CRC evidence fix. Use `git log -1` for the follow-up commit hash.
-- After the Task 12 follow-up commit, the branch is eight commits ahead of `origin/main`; do not claim that physical hardware is verified.
+- Latest completed task: Task 12 (`验证：记录 USB 设备基础无硬件门禁`), commit `3c6ad7e`, plus worker CRC evidence fix `e33bc4a` and a documentation correction. Use `git log -1` for the documentation correction hash.
+- After the Task 12 documentation correction commit, the branch is nine commits ahead of `origin/main`; do not claim that physical hardware is verified.
 - Tasks 1-12 are implemented, tested, and committed. The Task 12 specification review gaps are remediated; focused independent re-review is the next gate before push.
 - Task 12 desktop gates pass: Python 64 tests (63 passed, 1 Windows symlink skip), Vitest 154/154, TypeScript typecheck, Vite production build, Rust 127/127, and Clippy with `-D warnings`.
 - Task 12 firmware gates pass under `D:\DevTools\PlatformIO`: PlatformIO Core 6.1.19, Espressif32 7.0.1, native firmware tests 38/38, and `waveshare_amoled_143` target build SUCCESS.

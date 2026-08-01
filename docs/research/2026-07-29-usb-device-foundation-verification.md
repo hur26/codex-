@@ -183,5 +183,6 @@ Hook 回归包含在 Python/Vitest/Rust 全量门禁中；BOM 与接线文档把
 ## 工作树检查
 
 更新本报告和 `AGENTS.md` 后执行 `git diff --check`，退出码 0；精确暂存两份
-文件后执行 `git diff --cached --check`，退出码同样为 0。Task 12 没有修改产品
-实现或测试文件。
+文件后执行 `git diff --cached --check`，退出码同样为 0。后续规格审查发现缺少
+worker 边界 CRC 证据，因此从生产 `run_device_manager` 提取并复用了单次迭代
+函数，新增一个 worker 回归测试；CRC、重试和设备状态机行为本身没有改变。
