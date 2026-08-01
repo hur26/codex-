@@ -2,8 +2,9 @@
 
 Codex Halo 是 Windows 优先、跨平台架构的四环虚拟设备控制中心。当前
 `0.1.0` 是开发包：它读取经过脱敏的本地 Codex Hook 生命周期事件，在四个
-同心圆环中显示任务状态，并提供手动绑定、锁定、交换和灯效编辑。当前版本不
-包含 USB、固件或实体灯控制。
+同心圆环中显示任务状态，并提供手动绑定、锁定、交换、灯效编辑和 USB CDC
+Halo 设备开发路径。真实实体灯环、屏幕、编码器和供电兼容性仍需后续硬件
+bring-up 验证。
 
 ## Windows 开发环境
 
@@ -20,9 +21,20 @@ npm install
 npm run tauri dev
 ```
 
-没有探针事件时，应用仍以 `VIRTUAL DEVICE` 启动，不会尝试连接 USB。浏览器
-中的 `npm run dev` 使用确定性的演示 bridge；`npm run tauri dev` 使用本地
-Tauri bridge。
+## 硬件原型提示
+
+- 当前桌面包可以驱动虚拟设备或 USB CDC Halo 设备。Task 12 只完成无硬件门禁；真实硬件兼容性必须等实体 bring-up 后确认。
+- 第一轮硬件验证只允许接一圈 20 LED 的 5 V 灯环，并使用带限流保护的 5 V 电源。
+- 固件功耗限制保持 `maxMilliAmps=500`，亮度硬上限保持 30%，直到台架实测电流和温升通过。
+- 独立供电时必须遵守完整清单中的上电/下电顺序；灯环未供电时禁止驱动 DATA。
+- 不要把任务身份、提示词、回复、源码、路径、凭据或 USB 序列号发送给固件。
+- 采购与接线资料见[最小采购 BOM](../../docs/hardware/2026-07-29-prototype-bom-v0.1.md)和[接线与供电检查清单](../../docs/hardware/2026-07-29-wiring-and-power-checklist.md)。
+
+默认设备传输仍是模拟器 / `VIRTUAL DEVICE`。Tauri 开发环境需要显式设置
+`CODEX_HALO_DEVICE_TRANSPORT=serial` 才会启用 USB CDC Halo 设备路径；Hook
+探针事件只影响本地事件输入，不决定是否尝试连接 USB。浏览器中的
+`npm run dev` 使用确定性的演示 bridge；`npm run tauri dev` 使用本地 Tauri
+bridge。
 
 ## Hook 事件目录
 

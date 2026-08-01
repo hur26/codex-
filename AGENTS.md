@@ -55,17 +55,16 @@ $env:PATH = 'D:\DevTools\CLion 2026.1\bin\mingw\bin;' + $env:PATH
 ## Current Progress
 
 - Branch: `main`.
-- Latest completed task: Task 10 (`固件：实现设备状态机与安全适配层`). Use `git log -1` for its commit hash.
-- After the Task 10 commit, the branch is five commits ahead of `origin/main`; do not push until Task 12 and all final gates pass.
-- Tasks 1-10 are implemented, independently reviewed, tested, and committed.
-- Task 10 implements the firmware device controller, fixed v0.1 state payload validation, null HAL interfaces, non-blocking USB CDC main loop, 3 s watchdog, default `maxMilliAmps=500`, and `brightnessCeiling=30`.
-- Task 10 decoder behavior is split between generic protocol decoding, which preserves valid half frames up to 512-byte payloads, and firmware `StrictV01` mode, which rejects impossible fixed v0.1 payload lengths before they can stall recovery.
-- Task 10 TX uses a fixed `TxPump` with 8 frame slots of 19 bytes each, `Serial.setTxTimeoutMs(0)`, full-frame backpressure, short-write retry, and pending decoded input so state writes are not applied before their ACK/NACK can be queued.
-- Task 10 native firmware tests pass 38/38 across protocol, state, and HAL queues. They cover low-revision full snapshot overwrite, strict length recovery, generic max-frame retention with nested frame bytes, CRC resynchronization, unsupported version safety, and TX queue backpressure.
-- Task 10 target build `waveshare_amoled_143` passes with PlatformIO under `D:\DevTools\PlatformIO`.
-- Task 10 independent specification review: PASS.
-- Task 10 independent code-quality review: PASS.
-- Next planned work: Task 11 BOM/wiring/power documentation, then Task 12 full no-hardware end-to-end gates and verification report.
+- Latest committed task: Task 10 (`固件：实现设备状态机与安全适配层`), commit `abe853f`.
+- The branch is five commits ahead of `origin/main`; do not push until Task 12 and all final gates pass.
+- Tasks 1-10 are implemented, independently reviewed, tested, and committed. Task 11 is implemented, acceptance-checked, and independently approved, but remains uncommitted because the current permission profile makes `.git` read-only.
+- Task 11 adds a minimum one-ring purchase BOM, a separately marked four-ring estimate, and a pre-power wiring and power checklist; no price, stock, or physical-hardware validation is claimed.
+- Task 11 hardware boundaries require power-off wiring, explicit shared-ground and independent-rail power sequencing, no-load voltage and polarity checks, external current-limited 5 V LED power, a 330-470 ohm data resistor, a correctly polarized 500-1000 uF capacitor, and a deterministic AHCT125-class buffer topology with fixed enable and an approximately 10 kΩ data-input pull-down.
+- Task 11 keeps firmware limits at `maxMilliAmps=500` and 30% brightness, states that software limits do not replace external current limiting, prevents unverified external-5 V backfeed into the board, and requires immediate power-off on restart, flicker, heat, polarity, or abnormal-current symptoms.
+- Task 11 independent specification review: PASS.
+- Task 11 independent code-quality and hardware-safety review: APPROVE.
+- Task 11 documentation gates pass: all planned safety terms are present, both README link pairs resolve to the hardware documents, and `git diff --check` passes.
+- Next planned work: restore `.git` write access, commit Task 11, then run Task 12 full no-hardware end-to-end gates and verification report.
 - After Task 12 passes, push `main` and send the user a concise Chinese development summary.
 
 ## Previous Progress Snapshot
