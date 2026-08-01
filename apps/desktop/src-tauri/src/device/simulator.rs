@@ -1,7 +1,9 @@
 use crate::device::presentation::{
     DeviceDirection, DeviceDisplayMode, DeviceRing, DeviceSnapshot, DeviceTaskStatus,
 };
-use crate::device::protocol::{self, Decoder, Frame, MessageType, PROTOCOL_MAJOR};
+use crate::device::protocol::{
+    self, Decoder, DecoderMode, Frame, MessageType, ProtocolError, PROTOCOL_MAJOR,
+};
 use crate::device::transport::{DeviceTransport, Endpoint, TransportError, TransportKind};
 use std::collections::VecDeque;
 
@@ -74,7 +76,7 @@ impl Default for SimulatedTransport {
     fn default() -> Self {
         Self {
             connected: false,
-            decoder: Decoder::default(),
+            decoder: Decoder::new(DecoderMode::StrictV01),
             responses: VecDeque::new(),
             faults: VecDeque::new(),
             protocol_major: PROTOCOL_MAJOR,
@@ -98,6 +100,12 @@ impl SimulatedTransport {
 
     pub fn pending_fault_count(&self) -> usize {
         self.faults.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_raw_response(&mut self, bytes: Vec<u8>) {
+        self.responses
+            .push_back(PendingResponse { bytes, fault: None });
     }
 
     pub fn set_protocol_major(&mut self, protocol_major: u8) {
@@ -363,7 +371,7 @@ impl DeviceTransport for SimulatedTransport {
             return Err(TransportError::EndpointNotFound);
         }
         self.connected = true;
-        self.decoder = Decoder::default();
+        self.decoder = Decoder::new(DecoderMode::StrictV01);
         self.responses.clear();
         Ok(())
     }
@@ -376,6 +384,15 @@ impl DeviceTransport for SimulatedTransport {
         for decoded in self.decoder.push(bytes) {
             let result = match decoded {
                 Ok(frame) => self.process_frame(frame),
+                Err(ProtocolError::InvalidPayloadLength {
+                    message_type,
+                    sequence,
+                    ..
+                }) => self.queue_nack(
+                    &Frame::new(message_type, sequence, Vec::new()),
+                    NackReason::MalformedPayload,
+                    None,
+                ),
                 Err(error) => Err(TransportError::Protocol(error)),
             };
             if first_error.is_none() {
@@ -408,7 +425,7 @@ impl DeviceTransport for SimulatedTransport {
 
     fn disconnect(&mut self) -> Result<(), TransportError> {
         self.connected = false;
-        self.decoder = Decoder::default();
+        self.decoder = Decoder::new(DecoderMode::StrictV01);
         self.responses.clear();
         Ok(())
     }
@@ -888,6 +905,35 @@ mod tests {
             Frame::new(
                 MessageType::Capabilities,
                 2,
+                vec![0, 0, 1, 0, 4, 0x03, 0x00, 0x00, 0x02],
+            )
+        );
+    }
+
+    #[test]
+    fn simulator_rejects_impossible_fixed_length_before_processing_nested_hello() {
+        let mut simulator = SimulatedTransport::default();
+        connect(&mut simulator);
+        let mut bytes = vec![0x43, 0x48, 0x01, 0x02, 0x09, 0x00, 0x00, 0x02];
+        bytes.extend(protocol::encode(&Frame::new(MessageType::Hello, 10, vec![0])).unwrap());
+
+        assert_eq!(simulator.write(&bytes), Ok(()));
+        assert_eq!(
+            decode_one(&simulator.read().unwrap()),
+            Frame::new(
+                MessageType::Nack,
+                9,
+                vec![
+                    MessageType::Capabilities as u8,
+                    NackReason::MalformedPayload as u8,
+                ],
+            )
+        );
+        assert_eq!(
+            decode_one(&simulator.read().unwrap()),
+            Frame::new(
+                MessageType::Capabilities,
+                10,
                 vec![0, 0, 1, 0, 4, 0x03, 0x00, 0x00, 0x02],
             )
         );

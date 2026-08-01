@@ -22,6 +22,19 @@ struct GoldenVector {
   std::vector<uint8_t> frame;
 };
 
+struct DecoderStreamVector {
+  std::string mode;
+  std::vector<uint8_t> stream;
+  std::string expectedError;
+  uint8_t recoveredMessageType;
+  uint16_t recoveredSequence;
+  std::vector<uint8_t> recoveredPayload;
+  std::vector<uint8_t> additionalRecoveredFrame;
+  std::vector<uint8_t> bufferedTail;
+  std::vector<uint8_t> followupStream;
+  std::vector<uint8_t> followupFrame;
+};
+
 std::vector<uint8_t> fromHex(const std::string& value) {
   if (value.size() % 2 != 0) {
     throw std::runtime_error("hex value has odd length");
@@ -84,6 +97,52 @@ std::map<std::string, GoldenVector> loadGoldenVectors() {
             static_cast<uint16_t>(std::stoul(columns[2], nullptr, 16)),
             fromHex(columns[3]),
             fromHex(columns[4]),
+        });
+  }
+  return vectors;
+}
+
+std::map<std::string, DecoderStreamVector> loadDecoderStreamVectors() {
+  std::ifstream input("../../docs/protocol/decoder-stream-vectors.tsv");
+  if (!input) {
+    throw std::runtime_error("cannot open shared decoder stream vectors");
+  }
+
+  std::map<std::string, DecoderStreamVector> vectors;
+  std::string line;
+  std::getline(input, line);
+  while (std::getline(input, line)) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    if (line.empty()) {
+      continue;
+    }
+
+    std::vector<std::string> columns;
+    std::stringstream row(line);
+    std::string column;
+    while (std::getline(row, column, '\t')) {
+      columns.push_back(column);
+    }
+    if (!line.empty() && line.back() == '\t') {
+      columns.emplace_back();
+    }
+    while (columns.size() < 11) {
+      columns.emplace_back();
+    }
+    if (columns.size() != 11) {
+      throw std::runtime_error("invalid shared decoder stream vector row");
+    }
+
+    vectors.emplace(
+        columns[0],
+        DecoderStreamVector{
+            columns[1], fromHex(columns[2]), columns[3],
+            static_cast<uint8_t>(std::stoul(columns[4], nullptr, 16)),
+            static_cast<uint16_t>(std::stoul(columns[5], nullptr, 16)),
+            fromHex(columns[6]), fromHex(columns[7]), fromHex(columns[8]),
+            fromHex(columns[9]), fromHex(columns[10]),
         });
   }
   return vectors;
@@ -335,32 +394,41 @@ void test_false_max_length_magic_inside_bad_frame_does_not_stall_recovery() {
 }
 
 void test_crc_error_resynchronizes_to_magic_inside_bad_frame() {
-  const auto heartbeat = loadGoldenVectors().at("heartbeat").frame;
-  halo::Frame bad{halo::MessageType::Diagnostics, 23, heartbeat};
-  auto bytes = halo::encode(bad);
-  bytes.back() ^= 0xff;
+  const auto fixture = loadDecoderStreamVectors().at("crc_nested_valid");
+  TEST_ASSERT_EQUAL_STRING("generic", fixture.mode.c_str());
+  TEST_ASSERT_EQUAL_STRING("crc_mismatch", fixture.expectedError.c_str());
 
   halo::Decoder decoder;
-  const auto decoded = decoder.push(bytes.data(), bytes.size());
+  const auto decoded = decoder.push(fixture.stream.data(), fixture.stream.size());
   TEST_ASSERT_EQUAL_UINT32(2, decoded.size());
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(halo::ProtocolError::CrcMismatch),
                           static_cast<uint8_t>(decoded[0].error));
-  assertFrame(decoded[1], halo::MessageType::Heartbeat, 2, {});
+  assertFrame(decoded[1], messageType(fixture.recoveredMessageType),
+              fixture.recoveredSequence, fixture.recoveredPayload);
 }
 
 void test_incomplete_max_length_candidate_recovers_to_complete_nested_frame() {
-  const auto heartbeat = loadGoldenVectors().at("heartbeat").frame;
-  auto bytes = fromHex("434801200900ff01");
-  bytes.insert(bytes.end(), heartbeat.begin(), heartbeat.end());
+  const auto fixture =
+      loadDecoderStreamVectors().at("strict_invalid_length_nested");
+  TEST_ASSERT_EQUAL_STRING("strict_v01", fixture.mode.c_str());
+  TEST_ASSERT_EQUAL_STRING("invalid_payload_length",
+                           fixture.expectedError.c_str());
 
   halo::Decoder decoder{halo::DecoderMode::StrictV01};
-  const auto decoded = decoder.push(bytes.data(), bytes.size());
+  const auto decoded = decoder.push(fixture.stream.data(), fixture.stream.size());
   TEST_ASSERT_EQUAL_UINT32(2, decoded.size());
   TEST_ASSERT_EQUAL_UINT8(
       static_cast<uint8_t>(halo::ProtocolError::InvalidPayloadLength),
       static_cast<uint8_t>(decoded[0].error));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(halo::MessageType::Capabilities),
+      decoded[0].context.rawMessageType);
+  TEST_ASSERT_EQUAL_UINT16(9, decoded[0].context.sequence);
+  TEST_ASSERT_EQUAL_UINT16(halo::kMaxPayload,
+                           decoded[0].context.declaredPayloadLength);
   TEST_ASSERT_TRUE(decoded[0].context.respondable);
-  assertFrame(decoded[1], halo::MessageType::Heartbeat, 2, {});
+  assertFrame(decoded[1], messageType(fixture.recoveredMessageType),
+              fixture.recoveredSequence, fixture.recoveredPayload);
 }
 
 void test_generic_decoder_retains_max_frame_with_nested_valid_frame_bytes() {
@@ -379,6 +447,34 @@ void test_generic_decoder_retains_max_frame_with_nested_valid_frame_bytes() {
                                      encoded.size() - prefixLength);
   TEST_ASSERT_EQUAL_UINT32(1, decoded.size());
   assertFrame(decoded[0], frame.type, frame.sequence, frame.payload);
+}
+
+void test_crc_recovery_keeps_two_nested_frames_and_normalizes_outer_tail() {
+  const auto fixture =
+      loadDecoderStreamVectors().at("crc_two_nested_valid");
+  TEST_ASSERT_EQUAL_STRING("generic", fixture.mode.c_str());
+  TEST_ASSERT_EQUAL_STRING("crc_mismatch", fixture.expectedError.c_str());
+  TEST_ASSERT_EQUAL_STRING("4348011334120100502983",
+                           toHex(fixture.additionalRecoveredFrame).c_str());
+
+  halo::Decoder decoder;
+  const auto decoded = decoder.push(fixture.stream.data(), fixture.stream.size());
+  TEST_ASSERT_EQUAL_UINT32(3, decoded.size());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(halo::ProtocolError::CrcMismatch),
+                          static_cast<uint8_t>(decoded[0].error));
+  assertFrame(decoded[1], halo::MessageType::Heartbeat, 2, {});
+  assertFrame(decoded[2], halo::MessageType::Brightness, 0x1234, {0x50});
+  const size_t bufferedBeforeFollowup = decoder.bufferedSize();
+
+  const auto followup =
+      decoder.push(fixture.followupStream.data(), fixture.followupStream.size());
+  TEST_ASSERT_EQUAL_UINT32(1, followup.size());
+  assertFrame(followup[0], halo::MessageType::Hello, 1, {0});
+  TEST_ASSERT_EQUAL_STRING(toHex(fixture.followupFrame).c_str(),
+                           toHex(halo::encode(followup[0].frame)).c_str());
+  TEST_ASSERT_EQUAL_UINT32(fixture.bufferedTail.size(),
+                           bufferedBeforeFollowup);
+  TEST_ASSERT_EQUAL_UINT32(0, decoder.bufferedSize());
 }
 
 }  // namespace
@@ -403,5 +499,6 @@ int main(int, char**) {
   RUN_TEST(test_crc_error_resynchronizes_to_magic_inside_bad_frame);
   RUN_TEST(test_incomplete_max_length_candidate_recovers_to_complete_nested_frame);
   RUN_TEST(test_generic_decoder_retains_max_frame_with_nested_valid_frame_bytes);
+  RUN_TEST(test_crc_recovery_keeps_two_nested_frames_and_normalizes_outer_tail);
   return UNITY_END();
 }

@@ -199,6 +199,7 @@ void Decoder::decodeReady(std::vector<DecodeResult>& decoded) {
     result.context = context;
     decoded.push_back(std::move(result));
     discardPrefix(frameLength);
+    alignToMagic();
   }
 }
 
@@ -211,8 +212,16 @@ void Decoder::discardPrefix(size_t length) {
   used_ -= length;
 }
 
+void Decoder::alignToMagic() {
+  synchronizeFrom(0);
+}
+
 void Decoder::resynchronize() {
-  for (size_t index = 1; index + 1 < used_; ++index) {
+  synchronizeFrom(1);
+}
+
+void Decoder::synchronizeFrom(size_t searchStart) {
+  for (size_t index = searchStart; index + 1 < used_; ++index) {
     if (buffer_[index] == kMagic[0] && buffer_[index + 1] == kMagic[1]) {
       discardPrefix(index);
       return;

@@ -12,7 +12,8 @@ USB 设备基础计划的无硬件门禁全部通过。桌面端 Python、Vue/Ty
 以及固件原生测试和 Waveshare ESP32-S3 编译均成功；协议级模拟设备覆盖了握手、
 脱敏快照、增量更新、旋钮事件、两次重试、断线重连、CRC 故障恢复和版本不兼容
 停写。生产 worker 迭代还验证了 CRC 故障后继续同步。Rust 与 C++ 测试读取同一
-份 4 条黄金 TSV，隐私扫描没有发现任务身份或
+份 4 条有效帧黄金 TSV 和同一份 3 条异常流 TSV；异常流锁定了 CRC 失败后的
+逐字节重同步，以及严格 v0.1 固定载荷长度的提前拒绝。隐私扫描没有发现任务身份或
 USB 序列号进入设备载荷、设备诊断或固件状态。
 
 这些结果只证明协议、状态机、模拟传输、UI 合约和目标固件能够在无硬件环境中
@@ -47,21 +48,22 @@ USB 序列号进入设备载荷、设备诊断或固件状态。
 | 2 | `npm test --prefix apps/desktop` | 0 | 12 个测试文件、154 项测试全部通过 |
 | 3 | `npm run typecheck --prefix apps/desktop` | 0 | `vue-tsc --noEmit` 通过 |
 | 4 | `npm run build --prefix apps/desktop` | 0 | 类型检查和 Vite production build 通过，转换 42 个模块 |
-| 5 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | 0 | Rust 127 项全部通过；main 和 doc tests 各 0 项 |
+| 5 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | 0 | Rust 132 项全部通过；main 和 doc tests 各 0 项 |
 | 6 | `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings` | 0 | 通过 |
 | 7 | `python -m platformio --version` | 0 | `PlatformIO Core, version 6.1.19` |
-| 8 | `python -m platformio test -e native` | 0 | 3 个测试组、38/38 通过：HAL 4、协议 18、状态 16 |
-| 9 | `python -m platformio run -e waveshare_amoled_143` | 0 | Espressif32 7.0.1，目标构建成功；RAM 19,708/327,680 字节，Flash 280,293/6,553,600 字节 |
+| 8 | `python -m platformio test -e native` | 0 | 3 个测试组、39/39 通过：HAL 4、协议 19、状态 16 |
+| 9 | `python -m platformio run -e waveshare_amoled_143` | 0 | Espressif32 7.0.1，目标构建成功；RAM 19,708/327,680 字节，Flash 280,333/6,553,600 字节 |
 
 第 7～9 项在 `firmware/halo-esp32s3` 下执行。Python 唯一跳过项是 Windows
 会话无法创建符号链接时主动跳过的 Hook 安装测试；其余安装器和路径安全测试
 均实际运行。Rust 测试日志中的 MSVC linker stdout 仅说明正在创建 import
-library；随后 127 项测试通过，且独立的 Clippy `-D warnings` 门禁为 0。
+library；随后 132 项测试通过，且独立的 Clippy `-D warnings` 和
+`cargo fmt -- --check` 门禁均为 0。
 
 ## 十个模拟设备场景
 
 全量 Rust 门禁已经运行以下测试。本节另外执行了聚焦回归：worker CRC 1/1、
-manager 19/19、simulator 12/12、表冠模式/环绕 1/1、四圈脱敏投影 1/1，均为
+manager 20/20、simulator 13/13、表冠模式/环绕 1/1、四圈脱敏投影 1/1，均为
 退出码 0。
 
 ```powershell
@@ -87,8 +89,8 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml device::presentatio
 
 ## 故障注入
 
-模拟传输的故障队列按 FIFO、一次性消费，相关 simulator 聚焦测试 12/12 和
-manager 聚焦测试 19/19 全部通过：
+模拟传输的故障队列按 FIFO、一次性消费，相关 simulator 聚焦测试 13/13 和
+manager 聚焦测试 20/20 全部通过：
 
 - `TimeoutOnce`：连续 3 次超时只形成 2 次重试，随后重连并恢复完整快照；
 - `NackOnce(Busy)`：单次 NACK 不应用被拒绝的写入；连续 NACK 同样只重试
@@ -97,13 +99,16 @@ manager 聚焦测试 19/19 全部通过：
 - 显式断线：下一连接重新发送权威完整快照，而不是从旧增量继续；
 - 畸形载荷：返回 NACK 且不改变已应用状态；decoder 错误后，同一批次后续有效帧
   仍可恢复处理；
+- 不可能的固定 v0.1 载荷长度：生产 manager 和模拟设备均在收齐 8 字节头部后
+  立即拒绝，不等待声明的 512 字节；模拟设备按固件语义返回 malformed-payload
+  NACK，并继续处理同一批次内嵌的后续有效帧；
 - 过期旋钮序号被忽略，序号环绕后的新事件被接受，零增量旋转被拒绝。
 
 固件侧相应故障边界也通过原生测试：CRC 后续帧恢复、超长拒绝、未知版本/类型
 结构化错误、严格 v0.1 固定载荷长度恢复、ACK/NACK 队列背压，以及版本错误进入
 安全状态。
 
-## 共享黄金向量
+## 共享黄金向量与异常流
 
 唯一来源是：
 `D:\Project\codex-halo\docs\protocol\golden-vectors.tsv`，包含 `hello`、
@@ -111,12 +116,26 @@ manager 聚焦测试 19/19 全部通过：
 
 - Rust `device::protocol::tests::encodes_and_decodes_all_published_golden_vectors`
   通过 `include_str!("../../../../../docs/protocol/golden-vectors.tsv")` 读取该文件，
-  在全量 127 项中通过；
+  在全量 132 项中通过；
 - C++ `test_all_shared_golden_vectors_encode_and_decode` 通过
   `std::ifstream("../../docs/protocol/golden-vectors.tsv")` 读取同一文件，在 native
-  38 项中通过。
+  39 项中通过。
 
-因此两端不是各自复制测试常量，而是对同一份 TSV 执行编码和解码验证。
+异常流的唯一来源是
+`D:\Project\codex-halo\docs\protocol\decoder-stream-vectors.tsv`，包含 3 条：
+
+- `crc_nested_valid`：坏 CRC 候选帧的声明区间内含一帧有效心跳；两端先报告
+  CRC 错误，再从坏候选魔数之后恢复该心跳；
+- `strict_invalid_length_nested`：`CAPABILITIES` 声明通用上限 512 字节但不符合
+  v0.1 固定 9 字节布局；两端严格模式在 8 字节头部处拒绝，并恢复后续心跳。
+- `crc_two_nested_valid`：坏 CRC 外层内含连续心跳和亮度两帧，尾部故意留下
+  `A5 43`。两端恢复两帧后把尾部归一为合法半魔数 `43`，紧接下一次 `push`
+  的正常 HELLO 只产生一帧成功结果，不产生伪版本错误。
+
+Rust 测试通过 `include_str!`、C++ 测试通过 `std::ifstream` 读取同一异常流文件。
+因此两端不是各自复制测试常量，而是对两份共享 TSV 执行有效帧编码/解码与异常流
+重同步验证。Rust 默认 `Generic` 模式仍能保留并完成合法的 512 字节帧；生产
+manager 和模拟设备接收端显式使用 `StrictV01`。
 
 ## 隐私扫描
 
@@ -133,9 +152,9 @@ rg -n "taskKey|task_key|serial_number|serialNumber" `
 
 | 命中 | 解释 |
 |---|---|
-| `manager.rs:590 task_key: None` | manager 测试夹具明确构造无任务身份的槽位，不进入设备载荷 |
-| `manager.rs:1015 taskKey` | 负向断言：序列化设备状态不得包含 `taskKey` |
-| `manager.rs:1016 serialNumber` | 负向断言：序列化设备状态不得包含 `serialNumber` |
+| `manager.rs:592 task_key: None` | manager 测试夹具明确构造无任务身份的槽位，不进入设备载荷 |
+| `manager.rs:1032 taskKey` | 负向断言：序列化设备状态不得包含 `taskKey` |
+| `manager.rs:1033 serialNumber` | 负向断言：序列化设备状态不得包含 `serialNumber` |
 | `presentation.rs:348 task_key: Some(...)` | 脱敏投影测试故意在领域夹具放入 TaskKey，随后断言设备载荷不含该值且所有 label 为空 |
 | `serial.rs:252 serial_number` | 测试帮助函数的可选参数，只用于构造含虚构 USB 序列号的第三方 `UsbPortInfo` 测试值 |
 | `serial.rs:259 serial_number` | 同一测试帮助函数把虚构值复制进第三方测试结构，随后转换为生产候选项以验证序列号被丢弃；不是设备载荷或生产状态字段 |
@@ -149,7 +168,7 @@ rg -n "taskKey|task_key|serial_number|serialNumber" `
 
 | 产物 | 字节数 | SHA-256 |
 |---|---:|---|
-| `D:\Project\codex-halo\firmware\halo-esp32s3\.pio\build\waveshare_amoled_143\firmware.bin` | 280,656 | `C8D728CEE43CE000B1EF3C04222C106158C756EC795D9C58FEEC88925C80C00C` |
+| `D:\Project\codex-halo\firmware\halo-esp32s3\.pio\build\waveshare_amoled_143\firmware.bin` | 280,704 | `C7F17EB6400C6875855428123704918A989D5CEBFDE0E66EB08FE2A9CA1F51E6` |
 
 产物信息由 PowerShell `Resolve-Path`、`Get-Item` 和
 `Get-FileHash -Algorithm SHA256` 从上述 `firmware.bin` 直接读取，命令退出码 0。
@@ -159,8 +178,8 @@ rg -n "taskKey|task_key|serial_number|serialNumber" `
 
 ## 完成定义与验证边界
 
-无硬件可验证的完成定义已经满足：两端共享向量；半帧、噪声、CRC、超长和未知
-版本行为确定；模拟器覆盖握手、ACK/NACK、旋钮、超时和断线；每次新连接使用
+无硬件可验证的完成定义已经满足：两端共享有效帧与异常流向量；半帧、噪声、CRC、
+超长、固定 v0.1 长度和未知版本行为确定；模拟器覆盖握手、ACK/NACK、旋钮、超时和断线；每次新连接使用
 完整快照；CRC 恢复通过生产 worker 迭代边界验证；UI 区分 Hook adapter 与
 Halo device 状态；现有拖拽、绑定、灯效和
 Hook 回归包含在 Python/Vitest/Rust 全量门禁中；BOM 与接线文档把首轮限制为
@@ -186,3 +205,14 @@ Hook 回归包含在 Python/Vitest/Rust 全量门禁中；BOM 与接线文档把
 文件后执行 `git diff --cached --check`，退出码同样为 0。后续规格审查发现缺少
 worker 边界 CRC 证据，因此从生产 `run_device_manager` 提取并复用了单次迭代
 函数，新增一个 worker 回归测试；CRC、重试和设备状态机行为本身没有改变。
+
+总体审查随后发现 Rust 与固件对两项接收语义不一致：Rust 会把 CRC 失败候选按
+声明帧长整体丢弃，且生产接收端没有固定 v0.1 载荷长度的严格模式。本轮以共享
+`decoder-stream-vectors.tsv` 建立两端同源证据，把 Rust CRC 失败路径改为丢弃
+当前候选魔数后逐字节重同步，并为 Rust 增加与固件对称的 `Generic` / `StrictV01`
+模式。聚焦 RED 分别复现了内嵌帧丢失和 512 字节不可能声明阻塞；修复后 Rust
+132/132、固件 native 39/39、Clippy 和 rustfmt 检查均通过。质量复查进一步用
+第三条共享流复现了 Rust 丢失第二个内嵌帧、C++ 遗留坏外层 CRC 尾并在下一次
+`push` 产生伪版本错误的问题；两端现会逐帧消耗成功结果，并把剩余噪声归一为
+空缓冲或单字节半魔数。该修复没有增加任何
+实体硬件验证结论。

@@ -79,7 +79,9 @@ class Decoder {
   void pushByte(uint8_t byte);
   void decodeReady(std::vector<DecodeResult>& decoded);
   void discardPrefix(size_t length);
+  void alignToMagic();
   void resynchronize();
+  void synchronizeFrom(size_t searchStart);
 
   std::array<uint8_t, kBufferCapacity> buffer_{};
   size_t used_{0};

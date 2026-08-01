@@ -61,9 +61,20 @@ impl Frame {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProtocolError {
-    UnsupportedVersion { actual: u8 },
-    UnknownMessageType { actual: u8 },
-    PayloadTooLarge { actual: usize },
+    UnsupportedVersion {
+        actual: u8,
+    },
+    UnknownMessageType {
+        actual: u8,
+    },
+    PayloadTooLarge {
+        actual: usize,
+    },
+    InvalidPayloadLength {
+        message_type: MessageType,
+        sequence: u16,
+        actual: usize,
+    },
     CrcMismatch,
 }
 
@@ -105,12 +116,32 @@ pub fn crc16_ccitt_false(bytes: &[u8]) -> u16 {
     crc
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DecoderMode {
+    #[default]
+    Generic,
+    StrictV01,
+}
+
 pub struct Decoder {
     buffer: Vec<u8>,
+    mode: DecoderMode,
+}
+
+impl Default for Decoder {
+    fn default() -> Self {
+        Self::new(DecoderMode::Generic)
+    }
 }
 
 impl Decoder {
+    pub fn new(mode: DecoderMode) -> Self {
+        Self {
+            buffer: Vec::new(),
+            mode,
+        }
+    }
+
     pub fn push(&mut self, bytes: &[u8]) -> Vec<Result<Frame, ProtocolError>> {
         let mut decoded = Vec::new();
         for byte in bytes {
@@ -162,6 +193,18 @@ impl Decoder {
                 }
             };
 
+            if self.mode == DecoderMode::StrictV01
+                && payload_length != expected_v01_payload_length(message_type)
+            {
+                decoded.push(Err(ProtocolError::InvalidPayloadLength {
+                    message_type,
+                    sequence: u16::from_le_bytes([self.buffer[4], self.buffer[5]]),
+                    actual: payload_length,
+                }));
+                self.resynchronize();
+                continue;
+            }
+
             let frame_length = HEADER_BYTES + payload_length + CRC_BYTES;
             if self.buffer.len() < frame_length {
                 return;
@@ -174,24 +217,36 @@ impl Decoder {
             let actual_crc = crc16_ccitt_false(&self.buffer[MAGIC.len()..frame_length - CRC_BYTES]);
             if actual_crc != expected_crc {
                 decoded.push(Err(ProtocolError::CrcMismatch));
-                self.buffer.drain(..frame_length);
+                self.resynchronize();
                 continue;
             }
 
             let sequence = u16::from_le_bytes([self.buffer[4], self.buffer[5]]);
             let payload = self.buffer[HEADER_BYTES..HEADER_BYTES + payload_length].to_vec();
             decoded.push(Ok(Frame::new(message_type, sequence, payload)));
-            self.buffer.clear();
-            return;
+            self.buffer.drain(..frame_length);
+            self.align_to_magic();
         }
     }
 
-    fn resynchronize(&mut self) {
-        let next_magic = self.buffer[1..]
-            .windows(MAGIC.len())
-            .position(|window| window == MAGIC)
-            .map(|position| position + 1);
+    fn align_to_magic(&mut self) {
+        self.synchronize_from(0);
+    }
 
+    fn resynchronize(&mut self) {
+        self.synchronize_from(1);
+    }
+
+    fn synchronize_from(&mut self, search_start: usize) {
+        let next_magic = self
+            .buffer
+            .get(search_start..)
+            .and_then(|suffix| {
+                suffix
+                    .windows(MAGIC.len())
+                    .position(|window| window == MAGIC)
+            })
+            .map(|position| position + search_start);
         if let Some(position) = next_magic {
             self.buffer.drain(..position);
         } else if self.buffer.last() == Some(&MAGIC[0]) {
@@ -199,6 +254,18 @@ impl Decoder {
         } else {
             self.buffer.clear();
         }
+    }
+}
+
+fn expected_v01_payload_length(message_type: MessageType) -> usize {
+    match message_type {
+        MessageType::Hello | MessageType::Ack | MessageType::Brightness => 1,
+        MessageType::Capabilities => 9,
+        MessageType::FullSnapshot => 44,
+        MessageType::RingUpdate => 8,
+        MessageType::DisplayMode | MessageType::Nack | MessageType::KnobEvent => 2,
+        MessageType::Heartbeat => 0,
+        MessageType::Diagnostics => 7,
     }
 }
 
@@ -219,6 +286,20 @@ mod tests {
                 u8::from_str_radix(digits, 16).expect("hex fixture is valid")
             })
             .collect()
+    }
+
+    fn decoder_stream_fixture(name: &str) -> Vec<&'static str> {
+        include_str!("../../../../../docs/protocol/decoder-stream-vectors.tsv")
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let mut columns = line.split('\t').collect::<Vec<_>>();
+                assert!(columns.len() <= 11, "invalid decoder stream row: {line}");
+                columns.resize(11, "");
+                columns
+            })
+            .find(|columns| columns.first() == Some(&name))
+            .unwrap_or_else(|| panic!("missing decoder stream fixture: {name}"))
     }
 
     #[test]
@@ -336,21 +417,92 @@ mod tests {
     }
 
     #[test]
-    fn crc_error_ignores_false_magic_inside_the_completed_bad_frame() {
-        let false_header = decode_hex("4348012000000002");
-        let mut corrupt = encode(&Frame::new(MessageType::Diagnostics, 9, false_header))
-            .expect("fixture encodes");
-        *corrupt.last_mut().expect("fixture has CRC") ^= 0xff;
-        corrupt.extend(decode_hex("43480120020000006cae"));
+    fn crc_error_resynchronizes_to_valid_frame_inside_bad_candidate() {
+        let fixture = decoder_stream_fixture("crc_nested_valid");
+        assert_eq!(fixture.len(), 11);
+        assert_eq!(fixture[1], "generic");
+        assert_eq!(fixture[3], "crc_mismatch");
+        let stream = decode_hex(fixture[2]);
         let mut decoder = Decoder::default();
 
         assert_eq!(
-            decoder.push(&corrupt),
+            decoder.push(&stream),
             vec![
                 Err(ProtocolError::CrcMismatch),
-                Ok(Frame::new(MessageType::Heartbeat, 2, vec![]))
+                Ok(Frame::new(
+                    MessageType::try_from(u8::from_str_radix(fixture[4], 16).unwrap()).unwrap(),
+                    u16::from_str_radix(fixture[5], 16).unwrap(),
+                    decode_hex(fixture[6]),
+                )),
             ]
         );
+    }
+
+    #[test]
+    fn strict_v01_rejects_impossible_fixed_length_and_recovers_nested_frame() {
+        let fixture = decoder_stream_fixture("strict_invalid_length_nested");
+        assert_eq!(fixture.len(), 11);
+        assert_eq!(fixture[1], "strict_v01");
+        assert_eq!(fixture[3], "invalid_payload_length");
+        let mut decoder = Decoder::new(DecoderMode::StrictV01);
+
+        assert_eq!(
+            decoder.push(&decode_hex(fixture[2])),
+            vec![
+                Err(ProtocolError::InvalidPayloadLength {
+                    message_type: MessageType::Capabilities,
+                    sequence: 9,
+                    actual: MAX_PAYLOAD,
+                }),
+                Ok(Frame::new(
+                    MessageType::try_from(u8::from_str_radix(fixture[4], 16).unwrap()).unwrap(),
+                    u16::from_str_radix(fixture[5], 16).unwrap(),
+                    decode_hex(fixture[6]),
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_decoder_retains_a_maximum_frame_containing_nested_magic() {
+        let nested = decode_hex("43480120020000006cae");
+        let mut payload = vec![0xa5; MAX_PAYLOAD];
+        payload[..nested.len()].copy_from_slice(&nested);
+        let frame = Frame::new(MessageType::Diagnostics, 24, payload);
+        let encoded = encode(&frame).expect("maximum generic frame encodes");
+        let prefix_length = HEADER_BYTES + nested.len();
+        let mut decoder = Decoder::default();
+
+        assert!(decoder.push(&encoded[..prefix_length]).is_empty());
+        assert_eq!(decoder.buffer.len(), prefix_length);
+        assert_eq!(decoder.push(&encoded[prefix_length..]), vec![Ok(frame)]);
+    }
+
+    #[test]
+    fn crc_recovery_keeps_two_nested_frames_and_normalizes_the_outer_tail() {
+        let fixture = decoder_stream_fixture("crc_two_nested_valid");
+        assert_eq!(fixture.len(), 11);
+        assert_eq!(fixture[1], "generic");
+        assert_eq!(fixture[3], "crc_mismatch");
+        let mut decoder = Decoder::default();
+
+        assert_eq!(
+            decoder.push(&decode_hex(fixture[2])),
+            vec![
+                Err(ProtocolError::CrcMismatch),
+                Ok(Frame::new(MessageType::Heartbeat, 2, vec![])),
+                Ok(Frame::new(MessageType::Brightness, 0x1234, vec![0x50])),
+            ]
+        );
+        assert_eq!(hex(&decoder.buffer), fixture[8]);
+
+        assert_eq!(fixture[7], "4348011334120100502983");
+        assert_eq!(fixture[9], fixture[10]);
+        assert_eq!(
+            decoder.push(&decode_hex(fixture[9])),
+            vec![Ok(Frame::new(MessageType::Hello, 1, vec![0]))]
+        );
+        assert!(decoder.buffer.is_empty());
     }
 
     #[test]

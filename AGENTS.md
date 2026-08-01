@@ -6,7 +6,8 @@
 - The active implementation plan is `docs/plans/2026-07-29-usb-device-foundation.md`.
 - The approved design is `docs/plans/2026-07-29-usb-device-foundation-design.md`.
 - The USB v0.1 protocol specification is `docs/protocol/codex-halo-usb-v0.1.md`.
-- Shared cross-language protocol vectors are in `docs/protocol/golden-vectors.tsv`.
+- Shared cross-language valid-frame vectors are in `docs/protocol/golden-vectors.tsv`.
+- Shared cross-language decoder error streams are in `docs/protocol/decoder-stream-vectors.tsv`.
 - The verification report is `docs/research/2026-07-29-usb-device-foundation-verification.md` and must be finalized in Task 12.
 
 ## Mandatory Workflow
@@ -55,17 +56,18 @@ $env:PATH = 'D:\DevTools\CLion 2026.1\bin\mingw\bin;' + $env:PATH
 ## Current Progress
 
 - Branch: `main`.
-- Latest completed task: Task 12 (`验证：记录 USB 设备基础无硬件门禁`), commit `3c6ad7e`, plus worker CRC evidence fix `e33bc4a` and a documentation correction. Use `git log -1` for the documentation correction hash.
-- After the Task 12 documentation correction commit, the branch is nine commits ahead of `origin/main`; do not claim that physical hardware is verified.
-- Tasks 1-12 are implemented, tested, and committed. The Task 12 specification review gaps are remediated; focused independent re-review is the next gate before push.
-- Task 12 desktop gates pass: Python 64 tests (63 passed, 1 Windows symlink skip), Vitest 154/154, TypeScript typecheck, Vite production build, Rust 127/127, and Clippy with `-D warnings`.
-- Task 12 firmware gates pass under `D:\DevTools\PlatformIO`: PlatformIO Core 6.1.19, Espressif32 7.0.1, native firmware tests 38/38, and `waveshare_amoled_143` target build SUCCESS.
+- Latest completed task: Task 12 (`验证：记录 USB 设备基础无硬件门禁`), commit `3c6ad7e`, plus worker CRC evidence fix `e33bc4a` and documentation correction `4902003`.
+- The protocol-consistency remediation is recorded in the current commit; after it, the branch is ten commits ahead of `origin/main`. Do not claim that physical hardware is verified.
+- Tasks 1-12 are implemented, tested, and committed. Overall review and its focused quality review found three protocol consistency gaps; all have TDD fixes and passed independent specification and code-quality re-review.
+- Task 12 desktop gates pass: Python 64 tests (63 passed, 1 Windows symlink skip), Vitest 154/154, TypeScript typecheck, Vite production build, Rust 132/132, Clippy with `-D warnings`, and rustfmt check.
+- Task 12 firmware gates pass under `D:\DevTools\PlatformIO`: PlatformIO Core 6.1.19, Espressif32 7.0.1, native firmware tests 39/39, and `waveshare_amoled_143` target build SUCCESS.
 - The ten required simulated-device scenarios pass: VIRTUAL, handshake, four-ring sanitized snapshot, single-ring delta, short press, rotation wrap, exactly two retries, reconnect full snapshot, CRC recovery through the production worker iteration boundary, and INCOMPATIBLE without state writes.
-- Rust and C++ both consume the same four rows in `docs/protocol/golden-vectors.tsv`; their shared-vector tests pass.
+- Rust and C++ both consume the same four valid rows in `docs/protocol/golden-vectors.tsv` and the same three decoder-error streams in `docs/protocol/decoder-stream-vectors.tsv`; all shared-vector tests pass.
+- CRC errors now discard only the current candidate magic before searching later bytes. Both decoders recover multiple consecutive valid frames nested in a failed candidate, normalize the bad outer tail to empty or a legal half magic, and accept the next pushed frame without a false protocol error. Rust retains `Generic` 512-byte frame semantics while production manager and simulator receive paths use `StrictV01` fixed-length rejection, matching firmware.
 - The privacy scan has seven allowed test-only/negative-assertion matching lines and no task identity or USB serial number in device payloads, device diagnostics, or firmware state.
-- Firmware artifact: `firmware/halo-esp32s3/.pio/build/waveshare_amoled_143/firmware.bin`, 280656 bytes, SHA-256 `C8D728CEE43CE000B1EF3C04222C106158C756EC795D9C58FEEC88925C80C00C`.
+- Firmware artifact: `firmware/halo-esp32s3/.pio/build/waveshare_amoled_143/firmware.bin`, 280704 bytes, SHA-256 `C7F17EB6400C6875855428123704918A989D5CEBFDE0E66EB08FE2A9CA1F51E6`.
 - No physical USB, AMOLED, LED ring, knob, power rail, signal level, thermal behavior, enclosure, or four-ring assembly has been verified. The next hardware step is only the minimum one-ring prototype kit from the BOM.
-- Next planned work: complete the focused specification re-review and code-quality review, perform the overall final review, push `main`, send the user a concise Chinese development summary, and then prepare the minimum one-ring purchase/assembly session.
+- Next planned work: commit and verify the independently reviewed UI diagnostic-safety correction, implement and review the finite bidirectional diagnostics path required by the approved v0.1 design, rerun the overall final review and full gates, push `main`, send the user a concise Chinese development summary, and then prepare the minimum one-ring purchase/assembly session.
 
 ## Previous Progress Snapshot
 

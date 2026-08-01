@@ -1,5 +1,7 @@
 use crate::device::presentation::{DeviceSnapshot, DeviceUpdate};
-use crate::device::protocol::{self, Decoder, Frame, MessageType, ProtocolError, MAX_PAYLOAD};
+use crate::device::protocol::{
+    self, Decoder, DecoderMode, Frame, MessageType, ProtocolError, MAX_PAYLOAD,
+};
 use crate::device::transport::{DeviceTransport, TransportError, TransportKind};
 use crate::domain::model::{HaloSnapshot, PresentationIntent};
 use serde::Serialize;
@@ -108,7 +110,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
         let transport_kind = transport.kind();
         Self {
             transport,
-            decoder: Decoder::default(),
+            decoder: Decoder::new(DecoderMode::StrictV01),
             status: DeviceStatus {
                 revision: 0,
                 state: DeviceConnectionState::Connecting,
@@ -207,7 +209,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
             self.metrics.reconnect_count = self.metrics.reconnect_count.saturating_add(1);
         }
         self.ever_connected = true;
-        self.decoder = Decoder::default();
+        self.decoder = Decoder::new(DecoderMode::StrictV01);
         self.pending = None;
         self.queued_writes.clear();
         self.target_snapshot = None;
@@ -505,7 +507,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
     }
 
     fn reset_connection_state(&mut self) {
-        self.decoder = Decoder::default();
+        self.decoder = Decoder::new(DecoderMode::StrictV01);
         self.pending = None;
         self.queued_writes.clear();
         self.target_snapshot = None;
@@ -568,7 +570,7 @@ fn sequence_is_newer(previous: Option<u16>, candidate: u16) -> bool {
 mod tests {
     use super::{DeviceConnectionState, DeviceManager};
     use crate::device::presentation::DeviceSnapshot;
-    use crate::device::protocol::MessageType;
+    use crate::device::protocol::{self, Frame, MessageType};
     use crate::device::simulator::{Fault, KnobEvent, SimulatedTransport};
     use crate::device::transport::DeviceTransport;
     use crate::domain::effects::EffectProfile;
@@ -678,6 +680,21 @@ mod tests {
             DeviceConnectionState::Incompatible
         );
         assert_eq!(missing_amoled_manager.transport().state_write_count(), 0);
+    }
+
+    #[test]
+    fn manager_rejects_impossible_fixed_length_and_processes_nested_knob_event() {
+        let mut manager = online_manager();
+        let mut bytes = vec![0x43, 0x48, 0x01, 0x02, 0x09, 0x00, 0x00, 0x02];
+        bytes.extend(
+            protocol::encode(&Frame::new(MessageType::KnobEvent, 77, vec![0x02, 0])).unwrap(),
+        );
+        manager.transport_mut().queue_raw_response(bytes);
+
+        assert_eq!(
+            manager.step(10, &fixture_halo_snapshot()).intents,
+            vec![PresentationIntent::ShortPress]
+        );
     }
 
     #[test]
