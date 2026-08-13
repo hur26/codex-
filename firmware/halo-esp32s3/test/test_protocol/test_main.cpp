@@ -197,7 +197,7 @@ void test_hello_matches_shared_golden_vector() {
 
 void test_all_shared_golden_vectors_encode_and_decode() {
   const auto vectors = loadGoldenVectors();
-  TEST_ASSERT_EQUAL_UINT32(4, vectors.size());
+  TEST_ASSERT_EQUAL_UINT32(5, vectors.size());
   for (const auto& entry : vectors) {
     const GoldenVector& vector = entry.second;
     const halo::Frame frame{messageType(vector.messageType), vector.sequence,

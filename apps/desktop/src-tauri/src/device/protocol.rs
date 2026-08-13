@@ -24,7 +24,7 @@ pub enum MessageType {
 impl TryFrom<u8> for MessageType {
     type Error = ProtocolError;
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> Result<Self, ProtocolError> {
         match value {
             0x01 => Ok(Self::Hello),
             0x02 => Ok(Self::Capabilities),
@@ -50,15 +50,18 @@ pub enum DiagnosticSeverity {
     Error = 0x03,
 }
 
-impl TryFrom<u8> for DiagnosticSeverity {
-    type Error = ();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidDiagnosticSeverity;
 
-    fn try_from(value: u8) -> Result<Self, ()> {
+impl TryFrom<u8> for DiagnosticSeverity {
+    type Error = InvalidDiagnosticSeverity;
+
+    fn try_from(value: u8) -> Result<Self, InvalidDiagnosticSeverity> {
         match value {
             0x01 => Ok(Self::Info),
             0x02 => Ok(Self::Warning),
             0x03 => Ok(Self::Error),
-            _ => Err(()),
+            _ => Err(InvalidDiagnosticSeverity),
         }
     }
 }
@@ -72,8 +75,11 @@ pub enum DiagnosticCode {
     LocalLimit = 0x0004,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidDiagnosticCode;
+
 impl TryFrom<u16> for DiagnosticCode {
-    type Error = ();
+    type Error = InvalidDiagnosticCode;
 
     fn try_from(value: u16) -> Result<Self, Self::Error> {
         match value {
@@ -81,7 +87,7 @@ impl TryFrom<u16> for DiagnosticCode {
             0x0002 => Ok(Self::CrcError),
             0x0003 => Ok(Self::InvalidPayload),
             0x0004 => Ok(Self::LocalLimit),
-            _ => Err(()),
+            _ => Err(InvalidDiagnosticCode),
         }
     }
 }

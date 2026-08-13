@@ -336,7 +336,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
                     && frame.payload == [expected_type as u8] =>
             {
                 self.pending = None;
-                self.restore_diagnostic_message();
+                self.clear_diagnostic_message();
                 self.begin_next_write(now_ms);
             }
             ExpectedResponse::Ack(expected_type)
@@ -419,7 +419,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
                 TransportKind::Serial => DeviceConnectionState::Online,
             };
             self.status.message = None;
-            self.restore_diagnostic_message();
+            self.clear_diagnostic_message();
             self.last_heartbeat_ms = Some(now_ms);
         }
     }
@@ -434,17 +434,9 @@ impl<T: DeviceTransport> DeviceManager<T> {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
         let frame = Frame::new(message_type, sequence, payload);
-        let bytes = match protocol::encode(&frame) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                self.force_reconnect("Device frame could not be encoded");
-                return;
-            }
-        };
-        if self.transport.write(&bytes).is_err() {
-            self.force_reconnect("Device write failed");
+        let Some(bytes) = self.write_frame(&frame) else {
             return;
-        }
+        };
         self.pending = Some(PendingRequest {
             bytes,
             sequence,
@@ -519,23 +511,31 @@ impl<T: DeviceTransport> DeviceManager<T> {
             }
             .encode_payload(),
         );
-        let bytes = match protocol::encode(&frame) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                self.force_reconnect("Device frame could not be encoded");
-                return;
-            }
-        };
-        if self.transport.write(&bytes).is_err() {
-            self.force_reconnect("Device write failed");
+        if self.write_frame(&frame).is_none() {
             return;
         }
         self.next_sequence = sequence.wrapping_add(1);
         *diagnostic_sent = true;
     }
 
-    fn restore_diagnostic_message(&mut self) {
-        self.status.message = self.last_diagnostic_message.map(str::to_owned);
+    fn clear_diagnostic_message(&mut self) {
+        self.last_diagnostic_message = None;
+        self.status.message = None;
+    }
+
+    fn write_frame(&mut self, frame: &Frame) -> Option<Vec<u8>> {
+        let bytes = match protocol::encode(frame) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                self.force_reconnect("Device frame could not be encoded");
+                return None;
+            }
+        };
+        if self.transport.write(&bytes).is_err() {
+            self.force_reconnect("Device write failed");
+            return None;
+        }
+        Some(bytes)
     }
 
     fn decode_knob_event(&mut self, frame: &Frame) -> Option<PresentationIntent> {
@@ -820,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_before_pending_ack_is_silent_and_persists_after_ack() {
+    fn diagnostic_before_pending_ack_is_silent_and_clears_after_successful_ack() {
         let mut manager = online_manager();
         manager.transport_mut().script(Fault::TimeoutOnce);
         let mut changed = fixture_halo_snapshot();
@@ -858,10 +858,7 @@ mod tests {
         manager.step(261, &changed);
         assert!(manager.pending.is_none());
         assert_eq!(manager.metrics().retry_count, 1);
-        assert_eq!(
-            manager.status().message.as_deref(),
-            Some("Device reported a CRC error")
-        );
+        assert_eq!(manager.status().message, None);
     }
 
     #[test]

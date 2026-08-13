@@ -1,99 +1,92 @@
-# 有限双向诊断路径：独立规格审查与独立代码质量审查
+# 有限双向诊断路径：独立审查与处置记录
 
-**审查对象：** 工作区中尚未提交的有限双向 `DIAGNOSTICS` 实现及其文档。
+**初审日期：** 2026-08-12
 
-**审查范围：**
+**最终处置日期：** 2026-08-13
 
-- `apps/desktop/src-tauri/src/device/protocol.rs`
-- `apps/desktop/src-tauri/src/device/manager.rs`
-- `firmware/halo-esp32s3/lib/HaloCore/HaloState.hpp` / `HaloState.cpp`
-- `firmware/halo-esp32s3/lib/HaloHal/HaloHal.hpp`
-- `firmware/halo-esp32s3/src/main.cpp`
-- `apps/desktop/src/components/DeviceStatus.vue`
-- `docs/protocol/codex-halo-usb-v0.1.md`、`docs/protocol/golden-vectors.tsv`
-- `docs/research/2026-07-29-usb-device-foundation-verification.md`
+**远端审查基线：** `a98cfad`
 
-**审查环境：** macOS 工作副本（`/Users/mac/Desktop/codex-halo`）。该副本没有 `.git`，也没有 Rust、PlatformIO 工具链，因此本轮只能做静态审查，不能重跑 Rust、Vitest、Clippy、前端构建或固件门禁。可运行且已运行的门禁只有 Python 回归。
+**范围：** 有限双向 `DIAGNOSTICS` 的协议、Rust 桌面端、ESP32-S3 固件、共享向量、UI 隐私边界和验证文档。
 
-## 已执行的门禁
+## 结论
 
-| 命令 | 结果 |
-|---|---|
-| `python3 -m unittest discover -s tests -p 'test_*.py'` | 64 tests, OK（macOS 上无 Windows 符号链接跳过） |
+初审发现 4 项规格问题（S1-S4）和 6 项质量问题（Q1-Q6）。合并远端四个提交后，Windows 工作区完成剩余聚焦修复和全量复验。S1-S4、Q1-Q6 均已处置，没有已知的规格、正确性、隐私、构建或硬件安全阻塞项。
 
-其余门禁未执行，状态仍以 Windows 环境的上一轮记录为准。
+该结论只覆盖无硬件实现和编译验证。真实 USB CDC、AMOLED、LED 灯环、旋钮和供电仍未验证。
 
-## 独立规格审查
+## 规格发现
 
-结论：**有条件通过。** 实现行为与批准设计一致，未发现实现违反协议文档中已冻结的字节布局或常量。发现 4 项规格文档缺口，其中 S1、S2 已在本轮直接补齐协议文档；S3、S4 需要在有门禁的环境中处理。
+### S1 双向行为契约缺失（已关闭）
 
-### S1 双向诊断的行为契约不在冻结的协议文档中（已修复）
+协议第 2 节和第 4.12 节现已规定：合法诊断静默消费且不要求 ACK；不得刷新看门狗或改变权威状态；固件对非法桌面诊断返回复用序号的 `NACK`，桌面端用代码 `0003` 报告协议错误而不回 `NACK`；发送方必须限流；长度、严重级别或代码不合法均为格式错误。
 
-`docs/protocol/codex-halo-usb-v0.1.md` 只定义了 `DIAGNOSTICS` 的 7 字节布局和"双向、不要求 ACK"，没有定义现在两端实际遵守的规范行为：合法诊断必须静默消费且不刷新看门狗、不改变权威状态；非法诊断由固件复用 `sequence` 回 `NACK`（`rejectedMessageType = 81`），而桌面端不回 `NACK` 而是发送代码 `0003` 的诊断；发送方必须限流。
+### S2 方向语义与接收规则冲突（已关闭）
 
-这些规则此前只写在验证报告里。验证报告是过程记录，不是跨语言线路契约：仅按协议文档实现的第三方固件可以合法地对诊断回 `ACK` 或用诊断刷新看门狗，从而破坏互操作。
+协议第 3.6 节现已区分发送和接收责任。代码、严重级别和 `value` 表是发送方编码约束；接收方严格校验 7 字节长度、严重级别枚举和代码枚举，但对方向特有的代码/值组合保持结构性宽容。固件聚焦测试明确验证这一规则。
 
-`§2` 已补入上述规则，`§4.12` 已补入"长度、级别、代码任一不匹配即格式错误"。
+### S3 缺少跨语言诊断黄金向量（已关闭）
 
-### S2 代码表方向语义不明（已修复）
-
-`§3.6` 的代码表按设备视角措辞（"看门狗进入断连状态"、"CRC 错误"）。路径变为双向后，桌面端也会发送 `0002` 与 `0003`，用来描述桌面端自己的解码失败。文档没有说明代码是相对发送方还是相对接收方，接收方无法判断对端的 `0002` 指的是"你出错了"还是"我出错了"。`value` 的取值也只写了"与代码相关的非敏感数值"，两端实际取值不同。
-
-`§3.6` 已补入方向无关（相对发送方）的说明，以及按代码和方向固定的 `severity`/`value` 表。
-
-### S3 `DIAGNOSTICS` 没有跨语言黄金向量（待处理）
-
-`golden-vectors.tsv` 有 `hello`、`heartbeat`、`ack_hello`、`brightness_80` 四行，没有诊断行。`decoder-stream-vectors.tsv` 里的 `0x81` 只作为损坏外层容器出现，不校验诊断负载语义。
-
-计划的完成定义要求"Rust 与 C++ 读取同一份黄金向量并通过"。目前诊断编码只由两端各自的单元测试覆盖，而这两份测试来自同一次实现，无法排除共同误读。
-
-建议新增一行（CRC 已用 CRC-16/CCITT-FALSE 本地核算，并用现有 `hello` 行反向验证过实现）：
+`docs/protocol/golden-vectors.tsv` 新增：
 
 ```text
 diagnostics_crc_error	81	0005	02020007000000	4348018105000700020200070000009046
 ```
 
-必须在能同时运行 Rust 与 PlatformIO native 测试的环境中加入，并让两端的共享向量测试真正消费该行，否则不得写入 TSV。
+Rust 与 C++ 的共享 TSV 测试均实际读取第五行并完成编码、解码和 CRC 校验。固件协议测试的向量数量断言由 4 更新为 5。
 
-### S4 诊断消息的生命周期未定义（待处理）
+### S4 UI 诊断生命周期未定义（已关闭，保留明确边界）
 
-`DeviceManager` 把最后一条有效设备诊断存入 `last_diagnostic_message`，并在每次 ACK 后经 `restore_diagnostic_message` 重新写回 `status.message`；只有 `reset_connection_state` 会清除。因此一次瞬时的设备 CRC 错误会让 UI 上的"Device reported a CRC error"一直显示到重连为止，而固件没有"已恢复"诊断。
+采用事件驱动清除规则：有效设备诊断可暂存到 `status.message`，在下一次成功状态 ACK 或握手完成后清除。聚焦 Rust 测试覆盖“诊断到达、待确认写重试、成功 ACK 后清除”。
 
-`manager.rs:537`、`manager.rs:584`。这属于边沿事件被当作持久状态呈现。协议文档和批准设计都没有规定诊断文案的存活时间。需要在 Windows 环境中二选一：把"锁存到重连"写进设计作为 v0.1 的明确行为，或加入清除条件（例如成功完成 N 次状态写入后清空），后者需要 TDD 覆盖。
+该规则不是计时过期。若 manager 长期空闲且只有心跳，最后一条诊断可以继续显示；这是 v0.1 的明确行为选择，不得描述为“诊断必然快速消失”。
 
-## 独立代码质量审查
+## 质量发现
 
-结论：**有条件通过。** 未发现正确性缺陷或隐私泄漏。发现 5 项质量问题，均需在有门禁的环境中修改并重跑测试，本轮不改代码。
+### Q1 响应预测与实际处理漂移（已关闭）
 
-### Q1 诊断合法性判定被复制成两份（固件）
+`DeviceController::willRespondTo()` 和 `handle()` 共用 `diagnosticNeedsResponse()`。非空心跳会预测并实际返回 `NACK`；合法诊断静默，非法诊断预留响应容量；不兼容状态门禁保持一致；CRC 和不支持版本错误即使上下文误标为 respondable，也不会错误预留响应。
 
-`firmware/halo-esp32s3/src/main.cpp:43` 的 `requiresResponse` 重新调用 `Diagnostic::decodePayload`，用来决定是否为 `NACK` 预留发送槽位；`HaloState.cpp:245` 的 `Diagnostics` 分支再判定一次。同一条规则有两份实现，将来任何"什么算合法诊断"的改动只要漏改一处，槽位预留就会和实际是否回 `NACK` 脱节：TX 队列满时会在 `processDecoded` 里提前 `return`，或者反过来白白占用一个槽位。
+聚焦 RED 曾复现非空心跳“预测无响应、实际有响应”；GREEN 后状态机测试覆盖合法/非法诊断、非空心跳、不兼容状态和不可响应解码错误。
 
-建议由 `DeviceController` 暴露单一判定（例如 `wouldRespond(const Frame&)`），`main.cpp` 只调用它。
+### Q2 重复的 Rust 写帧路径（已关闭）
 
-### Q2 诊断发送路径复制了 `begin_request` 的编码与写入逻辑（桌面端）
+`begin_request()` 与 `report_protocol_diagnostic()` 现共用 `write_frame()` 的 encode/write/reconnect 路径。普通请求仍只在成功写入后建立 pending；无 ACK 诊断仍只在成功写入后推进序号并标记本 step 已发送，语义未改变。
 
-`manager.rs:507` 的 `report_protocol_diagnostic` 重复了 `manager.rs:427` `begin_request` 的 encode → write → 失败即 `force_reconnect` 结构，连两处错误文案（`"Device frame could not be encoded"`、`"Device write failed"`）都是复制的。差别只是诊断不设置 `pending`。建议抽出 `fn write_frame(&mut self, frame: &Frame) -> bool`，两处共用。
+### Q3 无效心跳响应字段（已关闭）
 
-### Q3 心跳分支写入了不会被发送的响应字段（固件）
+固件不再为 `shouldSend == false` 的合法心跳填充不会上线的响应类型和序号。
 
-`HaloState.cpp:238` 构造 `ControllerResponse` 并设置 `type = Heartbeat`、`sequence = frame.sequence`，但 `shouldSend` 保持默认 `false`，这两个字段永远不会上线。读代码时容易误以为固件会回送心跳。建议删除这两个赋值，或补一行说明为什么保留。
+### Q4 诊断槽位下标边界（已关闭，无传统运行时 RED）
 
-### Q4 诊断槽位下标依赖代码值连续（固件）
+诊断代码增加 `AfterLastCode` 哨兵；槽位数量由哨兵推导；静态断言固定连续编号；显式映射返回可选下标；写槽位前拒绝越界值。
 
-`HaloState.cpp:386` 与 `:391` 都用 `static_cast<size_t>(code) - 1` 索引 `std::array<std::optional<Diagnostic>, 4> pendingDiagnostics_`。只要将来新增第 5 个代码或代码值不再从 1 连续编号，就会越界写。建议加 `static_assert` 绑定代码数量与数组长度，或改成显式映射函数。
+这项修复不能声称传统运行时 RED/GREEN：v0.1 的公开路径只传入字面量枚举，无法构造越界代码。初始“失败”仅为编译失败，不是行为 RED。证据是编译边界探针、native 构建和 Windows 目标构建；私有越界拒绝分支仍无法通过公开 v0.1 API 覆盖。
 
-### Q5 旋钮输入的锁存要求没有写进接口（固件）
+### Q5 旋钮事件锁存契约（已关闭）
 
-`main.cpp:122` 在存在待发诊断时完全跳过 `knobInput.poll(nowMs)`，因此 `KnobInput` 实现必须把事件锁存到被轮询为止，否则用户的旋钮操作会在诊断积压期间被静默丢弃。`HaloHal.hpp` 的 `KnobInput` 接口没有写这条要求，而 v0.1 只有 `NullKnobInput`，实测无法暴露该问题。建议在接口注释中写明"实现必须保留事件直到 `poll` 被调用"。
+`KnobInput` 接口现明确要求实现把事件锁存到 `poll()` 消费，防止诊断背压期间未轮询导致事件丢失。
 
-### Q6 Rust `TryFrom` 使用 `()` 作为错误类型（桌面端，次要）
+### Q6 Rust `TryFrom` 的单位错误类型（已关闭）
 
-`protocol.rs:53` 与 `:75` 的 `TryFrom` 实现用 `type Error = ()`，所有调用点都写成 `.ok()?`，错误信息被完全丢弃。改成返回 `Option` 的 `from_u8` / `from_u16` 关联函数更直白，也避免和 `MessageType::try_from` 返回结构化 `ProtocolError` 的风格混淆。
+`DiagnosticSeverity` 和 `DiagnosticCode` 分别使用 `InvalidDiagnosticSeverity` 与 `InvalidDiagnosticCode`，不再返回 `()`。调用方仍可按既有协议解码路径丢弃细节。
 
-## 未验证项
+## 最终门禁
 
-- Rust 142 项测试、Clippy、rustfmt、Vitest 184 项、TypeScript 检查、Vite 生产构建：本环境无 Rust 工具链与 `node_modules`，未执行。
-- 固件 native 47 项测试与 `waveshare_amoled_143` 目标构建：本环境无 PlatformIO，未执行。
-- 提交与推送：本工作副本没有 `.git`，无法比对未提交改动，也无法提交。
-- 实体硬件：屏幕、灯环、旋钮、真实 USB 握手、真实供电仍全部未验证。
+| 门禁 | 结果 |
+|---|---|
+| Python | 64 项运行，63 通过，1 个 Windows 符号链接场景跳过 |
+| Vitest | 12 个文件，184/184 通过 |
+| TypeScript / Vite | `vue-tsc --noEmit` 与 production build 通过 |
+| Rust | 142/142；Clippy `-D warnings`；rustfmt check |
+| PlatformIO native | 52/52：HAL 6、协议 19、状态 27 |
+| Waveshare target | `waveshare_amoled_143` 构建成功 |
+| 隐私扫描 | 7 个允许的测试夹具、测试名称或负向断言命中；产品载荷和诊断无身份泄漏 |
+
+固件产物为 281808 字节，SHA-256：
+`DD6C7AF93910EAC7AD2E759B0BA60E9643B31A8DF15CD5FFCA9ABCC360230F96`。
+
+## 剩余边界
+
+- S4 文案可能在纯心跳空闲期保留，直到下一次成功状态 ACK 或握手；这是已记录行为，不是计时 TTL。
+- Q4 私有越界拒绝分支无法经当前公开 API 运行覆盖；静态断言、显式映射和两类构建提供编译边界证据。
+- 本轮没有实体硬件，因此不能推断 USB、电气、显示、灯环、旋钮、温升或长期稳定性。

@@ -32,6 +32,10 @@ bool validDiagnosticCode(uint16_t value) {
   return diagnosticSlotIndex(static_cast<DiagnosticCode>(value)).has_value();
 }
 
+bool diagnosticNeedsResponse(const std::vector<uint8_t>& payload) {
+  return !Diagnostic::decodePayload(payload).has_value();
+}
+
 uint64_t readUint64Le(const uint8_t* bytes) {
   uint64_t value = 0;
   for (uint8_t index = 0; index < 8; ++index) {
@@ -140,7 +144,9 @@ DeviceController::DeviceController(PowerPolicy powerPolicy,
 
 bool DeviceController::willRespondTo(const DecodeResult& decoded) const {
   if (!decoded.ok()) {
-    return decoded.context.respondable;
+    return decoded.error != ProtocolError::CrcMismatch &&
+           decoded.error != ProtocolError::UnsupportedVersion &&
+           decoded.context.respondable;
   }
   const MessageType type = decoded.frame.type;
   // The incompatible-state gate in handle() NACKs everything except HELLO and
@@ -150,10 +156,10 @@ bool DeviceController::willRespondTo(const DecodeResult& decoded) const {
     return true;
   }
   if (type == MessageType::Heartbeat) {
-    return false;
+    return decoded.frame.payload.empty() ? false : true;
   }
   if (type == MessageType::Diagnostics) {
-    return !Diagnostic::decodePayload(decoded.frame.payload).has_value();
+    return diagnosticNeedsResponse(decoded.frame.payload);
   }
   return true;
 }
@@ -265,7 +271,7 @@ ControllerResponse DeviceController::handle(const Frame& frame,
     }
 
     case MessageType::Diagnostics: {
-      if (!Diagnostic::decodePayload(frame.payload).has_value()) {
+      if (diagnosticNeedsResponse(frame.payload)) {
         return reject(frame, NackReason::MalformedPayload);
       }
       return {};

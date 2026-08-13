@@ -228,13 +228,15 @@ void test_diagnostic_payload_is_exact_little_endian_and_semantically_validated()
   }
 }
 
-void test_valid_desktop_diagnostic_is_silent_and_does_not_refresh_watchdog() {
+void test_structurally_valid_diagnostic_is_silent_and_does_not_refresh_watchdog() {
   halo::DeviceController controller;
   establishSnapshot(controller);
   while (controller.pendingDiagnostic().has_value()) {
     controller.popPendingDiagnostic();
   }
   const auto before = controller.state();
+  // Receiver validation is structural and direction-agnostic. Sender-side
+  // code/value restrictions are documented separately in the protocol.
   const halo::Diagnostic diagnostic{halo::DiagnosticSeverity::Info,
                                     halo::DiagnosticCode::LocalLimit, 30};
 
@@ -510,12 +512,27 @@ void test_response_prediction_matches_handling_in_incompatible_state() {
                                   200);
 }
 
+void test_response_prediction_ignores_nonrespondable_decoder_errors() {
+  halo::DeviceController controller;
+  halo::DecodeResult crc;
+  crc.error = halo::ProtocolError::CrcMismatch;
+  crc.context.respondable = true;
+  TEST_ASSERT_FALSE(controller.willRespondTo(crc));
+
+  halo::DecodeResult version;
+  version.error = halo::ProtocolError::UnsupportedVersion;
+  version.context.respondable = true;
+  TEST_ASSERT_FALSE(controller.willRespondTo(version));
+}
+
 void test_response_prediction_matches_handling_when_compatible() {
   halo::DeviceController controller;
   establishSnapshot(controller);
 
   assertPredictionMatchesHandling(controller, {MessageType::Heartbeat, 22, {}},
                                   200);
+  assertPredictionMatchesHandling(controller,
+                                  {MessageType::Heartbeat, 221, {0x01}}, 200);
   assertPredictionMatchesHandling(controller, {MessageType::Brightness, 23, {40}},
                                   201);
   assertPredictionMatchesHandling(
@@ -553,7 +570,7 @@ int main(int, char**) {
   RUN_TEST(test_hello_returns_fixed_capabilities);
   RUN_TEST(test_heartbeat_requires_empty_payload_and_has_no_response);
   RUN_TEST(test_diagnostic_payload_is_exact_little_endian_and_semantically_validated);
-  RUN_TEST(test_valid_desktop_diagnostic_is_silent_and_does_not_refresh_watchdog);
+  RUN_TEST(test_structurally_valid_diagnostic_is_silent_and_does_not_refresh_watchdog);
   RUN_TEST(test_invalid_desktop_diagnostic_is_nacked_and_queues_malformed_report);
   RUN_TEST(test_incompatible_state_consumes_valid_diagnostic_and_rejects_invalid);
   RUN_TEST(test_protocol_errors_coalesce_bounded_crc_and_malformed_diagnostics);
@@ -566,6 +583,7 @@ int main(int, char**) {
   RUN_TEST(test_diagnostic_slot_index_maps_each_code_and_refuses_every_other_value);
   RUN_TEST(test_response_prediction_matches_handling_in_incompatible_state);
   RUN_TEST(test_response_prediction_matches_handling_when_compatible);
+  RUN_TEST(test_response_prediction_ignores_nonrespondable_decoder_errors);
   RUN_TEST(test_sentinel_diagnostic_code_is_refused_on_the_wire);
   return UNITY_END();
 }
