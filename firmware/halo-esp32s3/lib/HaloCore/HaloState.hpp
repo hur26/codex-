@@ -55,7 +55,36 @@ enum class DiagnosticCode : uint16_t {
   CrcError = 2,
   InvalidPayload = 3,
   LocalLimit = 4,
+  // Sentinel, never encoded and never valid on the wire. A new code must be
+  // added directly above it so that kDiagnosticSlotCount grows with the enum;
+  // that constant sizes the fixed slot array and bounds every slot lookup and
+  // wire check, so a code added here cannot be silently dropped.
+  AfterLastCode,
 };
+
+constexpr size_t kDiagnosticSlotCount =
+    static_cast<size_t>(DiagnosticCode::AfterLastCode) - 1;
+
+// The codes are contiguous from 1 and map one-to-one onto the fixed coalescing
+// slots, so a code becomes a slot index by subtracting one. Pinning each code
+// keeps a renumbering or a reused value from silently remapping the slots;
+// the sentinel above keeps the count itself in step with the enum.
+static_assert(static_cast<uint16_t>(DiagnosticCode::WatchdogDisconnected) == 1,
+              "diagnostic codes must stay contiguous from 1");
+static_assert(static_cast<uint16_t>(DiagnosticCode::CrcError) == 2,
+              "diagnostic codes must stay contiguous from 1");
+static_assert(static_cast<uint16_t>(DiagnosticCode::InvalidPayload) == 3,
+              "diagnostic codes must stay contiguous from 1");
+static_assert(static_cast<uint16_t>(DiagnosticCode::LocalLimit) == 4,
+              "diagnostic codes must stay contiguous from 1");
+
+constexpr std::optional<size_t> diagnosticSlotIndex(DiagnosticCode code) {
+  const auto raw = static_cast<uint16_t>(code);
+  if (raw < 1 || raw > kDiagnosticSlotCount) {
+    return std::nullopt;
+  }
+  return static_cast<size_t>(raw) - 1;
+}
 
 struct Diagnostic {
   DiagnosticSeverity severity{DiagnosticSeverity::Info};
@@ -142,7 +171,8 @@ class DeviceController {
   bool protocolCompatible_{true};
   bool localLimitActive_{false};
   uint8_t lastLocalLimitValue_{0};
-  std::array<std::optional<Diagnostic>, 4> pendingDiagnostics_{};
+  std::array<std::optional<Diagnostic>, kDiagnosticSlotCount>
+      pendingDiagnostics_{};
 };
 
 }  // namespace halo

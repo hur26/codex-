@@ -2,6 +2,7 @@
 #include <unity.h>
 
 #include <cstdint>
+#include <iterator>
 #include <vector>
 
 namespace {
@@ -449,6 +450,43 @@ void test_local_current_limit_caps_effective_brightness() {
   TEST_ASSERT_EQUAL_UINT8(0, policy.limitBrightness(100, 0));
 }
 
+void test_diagnostic_slot_index_maps_each_code_and_refuses_every_other_value() {
+  constexpr halo::DiagnosticCode codes[] = {
+      halo::DiagnosticCode::WatchdogDisconnected, halo::DiagnosticCode::CrcError,
+      halo::DiagnosticCode::InvalidPayload, halo::DiagnosticCode::LocalLimit};
+  static_assert(std::size(codes) == halo::kDiagnosticSlotCount,
+                "every code that owns a slot must be listed here");
+
+  for (size_t expected = 0; expected < std::size(codes); ++expected) {
+    const auto index = halo::diagnosticSlotIndex(codes[expected]);
+    TEST_ASSERT_TRUE(index.has_value());
+    TEST_ASSERT_EQUAL_size_t(expected, *index);
+  }
+
+  // Sweep the whole representable domain rather than a sample, so no value
+  // outside the slot range can be indexed however the enum later changes.
+  // Zero is the dangerous one: subtracting one would underflow to SIZE_MAX.
+  for (uint32_t raw = 0; raw <= 0xFFFF; ++raw) {
+    const auto index =
+        halo::diagnosticSlotIndex(static_cast<halo::DiagnosticCode>(raw));
+    if (raw >= 1 && raw <= halo::kDiagnosticSlotCount) {
+      TEST_ASSERT_TRUE(index.has_value());
+      TEST_ASSERT_EQUAL_size_t(raw - 1, *index);
+    } else {
+      TEST_ASSERT_FALSE(index.has_value());
+    }
+  }
+}
+
+void test_sentinel_diagnostic_code_is_refused_on_the_wire() {
+  // The sentinel exists only to size the slot array. It must never be
+  // accepted as a decoded wire code.
+  std::vector<uint8_t> payload = {
+      2, static_cast<uint8_t>(halo::DiagnosticCode::AfterLastCode), 0, 0, 0, 0,
+      0};
+  TEST_ASSERT_FALSE(halo::Diagnostic::decodePayload(payload).has_value());
+}
+
 }  // namespace
 
 void setUp() {}
@@ -479,5 +517,7 @@ int main(int, char**) {
   RUN_TEST(test_respondable_decoder_error_returns_nack);
   RUN_TEST(test_watchdog_enters_low_brightness_disconnected_state);
   RUN_TEST(test_local_current_limit_caps_effective_brightness);
+  RUN_TEST(test_diagnostic_slot_index_maps_each_code_and_refuses_every_other_value);
+  RUN_TEST(test_sentinel_diagnostic_code_is_refused_on_the_wire);
   return UNITY_END();
 }

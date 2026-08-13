@@ -28,7 +28,9 @@ uint32_t readUint32Le(const uint8_t* bytes) {
 
 bool validDiagnosticSeverity(uint8_t value) { return value >= 1 && value <= 3; }
 
-bool validDiagnosticCode(uint16_t value) { return value >= 1 && value <= 4; }
+bool validDiagnosticCode(uint16_t value) {
+  return diagnosticSlotIndex(static_cast<DiagnosticCode>(value)).has_value();
+}
 
 uint64_t readUint64Le(const uint8_t* bytes) {
   uint64_t value = 0;
@@ -383,16 +385,22 @@ void DeviceController::popPendingDiagnostic() {
 }
 
 void DeviceController::queueDiagnostic(Diagnostic diagnostic) {
-  const size_t index = static_cast<size_t>(diagnostic.code) - 1;
-  pendingDiagnostics_[index] = diagnostic;
+  const auto index = diagnosticSlotIndex(diagnostic.code);
+  if (!index.has_value()) {
+    return;
+  }
+  pendingDiagnostics_[*index] = diagnostic;
 }
 
 void DeviceController::incrementDiagnostic(DiagnosticCode code) {
-  const size_t index = static_cast<size_t>(code) - 1;
-  const uint32_t previous = pendingDiagnostics_[index].has_value()
-                                ? pendingDiagnostics_[index]->value
+  const auto index = diagnosticSlotIndex(code);
+  if (!index.has_value()) {
+    return;
+  }
+  const uint32_t previous = pendingDiagnostics_[*index].has_value()
+                                ? pendingDiagnostics_[*index]->value
                                 : 0;
-  pendingDiagnostics_[index] = {
+  pendingDiagnostics_[*index] = {
       DiagnosticSeverity::Warning, code,
       previous == std::numeric_limits<uint32_t>::max() ? previous
                                                        : previous + 1};
