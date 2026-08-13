@@ -26,6 +26,14 @@ class DisplayRenderer {
 class KnobInput {
  public:
   virtual ~KnobInput() = default;
+
+  // Returns the next pending knob event, or nullopt when none is pending.
+  //
+  // The main loop skips polling on any iteration that still has a diagnostic
+  // queued or a full transmit pump, so an implementation must latch every
+  // event it observes and hold it until a poll consumes it. An implementation
+  // that only samples the hardware at the instant of the call will silently
+  // drop presses and rotations that happen between polls.
   virtual std::optional<KnobEvent> poll(uint32_t nowMs) = 0;
 };
 

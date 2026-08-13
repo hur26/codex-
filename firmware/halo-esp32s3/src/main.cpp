@@ -33,23 +33,10 @@ void applyState() {
   displayRenderer.apply(controller.state());
 }
 
-bool requiresResponse(const halo::DecodeResult& decoded) {
-  if (!decoded.ok()) {
-    return decoded.context.respondable;
-  }
-  if (decoded.frame.type == halo::MessageType::Heartbeat) {
-    return false;
-  }
-  if (decoded.frame.type == halo::MessageType::Diagnostics) {
-    return !halo::Diagnostic::decodePayload(decoded.frame.payload).has_value();
-  }
-  return true;
-}
-
 void processDecoded(uint32_t nowMs) {
   while (pendingDecodedIndex < pendingDecoded.size()) {
     const auto& decoded = pendingDecoded[pendingDecodedIndex];
-    if (requiresResponse(decoded) && transmitPump.full()) {
+    if (controller.willRespondTo(decoded) && transmitPump.full()) {
       return;
     }
 

@@ -138,6 +138,26 @@ DeviceController::DeviceController(PowerPolicy powerPolicy,
   }
 }
 
+bool DeviceController::willRespondTo(const DecodeResult& decoded) const {
+  if (!decoded.ok()) {
+    return decoded.context.respondable;
+  }
+  const MessageType type = decoded.frame.type;
+  // The incompatible-state gate in handle() NACKs everything except HELLO and
+  // DIAGNOSTICS, so it decides before any per-type rule below.
+  if (!protocolCompatible_ && type != MessageType::Hello &&
+      type != MessageType::Diagnostics) {
+    return true;
+  }
+  if (type == MessageType::Heartbeat) {
+    return false;
+  }
+  if (type == MessageType::Diagnostics) {
+    return !Diagnostic::decodePayload(decoded.frame.payload).has_value();
+  }
+  return true;
+}
+
 ControllerResponse DeviceController::handle(const Frame& frame,
                                             uint32_t nowMs) {
   if (!protocolCompatible_ && frame.type != MessageType::Hello &&
@@ -237,9 +257,9 @@ ControllerResponse DeviceController::handle(const Frame& frame,
       if (!frame.payload.empty()) {
         return reject(frame, NackReason::MalformedPayload);
       }
+      // A heartbeat is answered by refreshing the watchdog, not by a frame, so
+      // `shouldSend` stays false and no type or sequence is filled in.
       ControllerResponse response;
-      response.type = MessageType::Heartbeat;
-      response.sequence = frame.sequence;
       response.stateChanged = markCommunication(nowMs);
       return response;
     }

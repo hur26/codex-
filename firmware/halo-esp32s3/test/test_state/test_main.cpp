@@ -478,6 +478,52 @@ void test_diagnostic_slot_index_maps_each_code_and_refuses_every_other_value() {
   }
 }
 
+// The transmit pump reserves capacity from willRespondTo() before handling a
+// frame. If the prediction says no frame is produced but handling emits one,
+// the pump can already be full when the response is enqueued, and the caller
+// drops out without consuming the frame — so the same frame is handled twice.
+void assertPredictionMatchesHandling(halo::DeviceController& controller,
+                                     const halo::Frame& frame,
+                                     uint32_t nowMs) {
+  halo::DecodeResult decoded;
+  decoded.frame = frame;
+  const bool predicted = controller.willRespondTo(decoded);
+  const auto response = controller.handle(frame, nowMs);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(response.shouldSend),
+                        static_cast<int>(predicted));
+}
+
+void test_response_prediction_matches_handling_in_incompatible_state() {
+  halo::DeviceController controller;
+  establishSnapshot(controller);
+  halo::DecodeResult versionError;
+  versionError.error = halo::ProtocolError::UnsupportedVersion;
+  versionError.context.rawMessageType =
+      static_cast<uint8_t>(MessageType::FullSnapshot);
+  versionError.context.sequence = 20;
+  versionError.context.respondable = false;
+  controller.handleProtocolError(versionError);
+
+  // The incompatible-state gate NACKs everything except HELLO and DIAGNOSTICS,
+  // and a heartbeat is neither.
+  assertPredictionMatchesHandling(controller, {MessageType::Heartbeat, 21, {}},
+                                  200);
+}
+
+void test_response_prediction_matches_handling_when_compatible() {
+  halo::DeviceController controller;
+  establishSnapshot(controller);
+
+  assertPredictionMatchesHandling(controller, {MessageType::Heartbeat, 22, {}},
+                                  200);
+  assertPredictionMatchesHandling(controller, {MessageType::Brightness, 23, {40}},
+                                  201);
+  assertPredictionMatchesHandling(
+      controller, {MessageType::Diagnostics, 24, {2, 2, 0, 7, 0, 0, 0}}, 202);
+  assertPredictionMatchesHandling(
+      controller, {MessageType::Diagnostics, 25, {9, 9, 9}}, 203);
+}
+
 void test_sentinel_diagnostic_code_is_refused_on_the_wire() {
   // The sentinel exists only to size the slot array. It must never be
   // accepted as a decoded wire code.
@@ -518,6 +564,8 @@ int main(int, char**) {
   RUN_TEST(test_watchdog_enters_low_brightness_disconnected_state);
   RUN_TEST(test_local_current_limit_caps_effective_brightness);
   RUN_TEST(test_diagnostic_slot_index_maps_each_code_and_refuses_every_other_value);
+  RUN_TEST(test_response_prediction_matches_handling_in_incompatible_state);
+  RUN_TEST(test_response_prediction_matches_handling_when_compatible);
   RUN_TEST(test_sentinel_diagnostic_code_is_refused_on_the_wire);
   return UNITY_END();
 }

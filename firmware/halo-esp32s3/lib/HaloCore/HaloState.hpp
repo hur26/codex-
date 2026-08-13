@@ -150,6 +150,11 @@ class DeviceController {
   ControllerResponse handleProtocolError(const DecodeResult& result);
   bool tick(uint32_t nowMs);
 
+  // Whether handling `decoded` may produce a frame to send. A caller reserves
+  // transmit capacity with this instead of restating the dispatch rules, so
+  // the reservation cannot drift away from what handling actually does.
+  bool willRespondTo(const DecodeResult& decoded) const;
+
   const DeviceState& state() const { return state_; }
   std::optional<Diagnostic> pendingDiagnostic() const;
   size_t pendingDiagnosticCount() const;
