@@ -32,7 +32,7 @@
 - The user-level `PLATFORMIO_CORE_DIR` is set to `D:\DevTools\PlatformIO`, but commands should still set it explicitly for reproducible handoffs.
 - Ask before using an unavoidable C: location for any new development dependency or download.
 
-On macOS there is a single volume, so the C:/D: split does not apply and toolchains use the default user-level locations:
+Windows is the only shipping target. macOS is a development-only environment: use it to write code and run gates, but never add macOS adaptation to the product, and treat Windows as the authority for final gates and for the released firmware artifact. On macOS there is a single volume, so the C:/D: split does not apply and toolchains use the default user-level locations:
 
 - rustup / cargo: `~/.rustup` and `~/.cargo`.
 - PlatformIO core directory: `~/.platformio` (`PLATFORMIO_CORE_DIR`).
