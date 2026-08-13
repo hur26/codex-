@@ -32,6 +32,14 @@
 - The user-level `PLATFORMIO_CORE_DIR` is set to `D:\DevTools\PlatformIO`, but commands should still set it explicitly for reproducible handoffs.
 - Ask before using an unavoidable C: location for any new development dependency or download.
 
+On macOS there is a single volume, so the C:/D: split does not apply and toolchains use the default user-level locations:
+
+- rustup / cargo: `~/.rustup` and `~/.cargo`.
+- PlatformIO core directory: `~/.platformio` (`PLATFORMIO_CORE_DIR`).
+- Cargo build output stays in `apps/desktop/src-tauri/target`.
+
+Check free space before installing: the full set (rustup, a Tauri 2 `target` directory, `node_modules`, and PlatformIO with the Espressif32 platform and Arduino-ESP32 framework) needs roughly 7-9 GB. The `native` PlatformIO environment alone needs only about 200 MB because it reuses the system clang and no Xtensa toolchain.
+
 ## PlatformIO Environment
 
 - PlatformIO Core: 6.1.19, invoked with `python -m platformio`.
@@ -55,9 +63,15 @@ $env:PATH = 'D:\DevTools\CLion 2026.1\bin\mingw\bin;' + $env:PATH
 
 ## Current Progress
 
-- Branch: `main`.
-- Latest completed task: Task 12 (`验证：记录 USB 设备基础无硬件门禁`), commit `3c6ad7e`, plus worker CRC evidence fix `e33bc4a`, documentation correction `4902003`, protocol-consistency remediation `be93025`, and UI diagnostic-safety correction `be86136`.
-- The reviewed finite bidirectional diagnostics implementation and its documentation are committed at the current `main` HEAD; locally, `main` is one commit ahead of `origin/main` pending push. Its first independent specification review found an incompatible-state gate issue; the focused TDD fix subsequently passed independent specification re-review and code-quality review.
+- Branch: `main`, synchronized with `origin/main` at `419f740` (`设备：贯通有限双向诊断路径`). Nothing is unpushed.
+- Latest completed task: Task 12 (`验证：记录 USB 设备基础无硬件门禁`), commit `3c6ad7e`, plus worker CRC evidence fix `e33bc4a`, documentation correction `4902003`, protocol-consistency remediation `be93025`, UI diagnostic-safety correction `be86136`, and the finite bidirectional diagnostics implementation `419f740`.
+- The finite bidirectional diagnostics implementation and its documentation are committed and pushed. Its first independent specification review found an incompatible-state gate issue; the focused TDD fix subsequently passed independent specification re-review and code-quality review.
+- A **second, independent review round** of the same diagnostics work ran on the macOS working copy and is recorded in `docs/research/2026-08-12-diagnostics-independent-review.md`. The Windows environment did not have this round when it committed and pushed `419f740`, so every finding below is still open at `origin/main`. Do not treat `419f740` as closing them.
+- Both re-reviews returned **conditional pass**: no correctness defect, no privacy leak, and no violation of the frozen byte layout or v0.1 constants. Four specification findings and six code-quality findings were raised.
+- Specification findings S1 and S2 are fixed in the working tree copy of `docs/protocol/codex-halo-usb-v0.1.md` but are **not yet committed**; `origin/main` still carries the pre-fix text. Section 2 now states the normative bidirectional diagnostics rules (silent consume, no ACK, no watchdog refresh, firmware NACKs a malformed diagnostic while the desktop answers with code `0003`, `rejectedMessageType = 81` is legal traffic, sender-side rate limiting), section 3.6 now states that codes are sender-relative and fixes `severity`/`value` per code and direction, and section 4.12 now states that a length, severity, or code mismatch is a format error.
+- Specification findings S3 and S4 remain open. S3: `DIAGNOSTICS` still has no shared cross-language golden vector, which the plan's definition of done requires; a candidate row `diagnostics_crc_error 81 0005 02020007000000 4348018105000700020200070000009046` is proposed in the review document and must not be written into the TSV until both the Rust and PlatformIO native suites actually consume it. S4: `DeviceManager` latches the last device diagnostic into `status.message` until reconnect, so a transient device CRC error stays on the UI indefinitely; either document the latch as intended v0.1 behavior or add a TDD-covered clearing rule.
+- Code-quality findings Q1-Q6 remain open and were deliberately not edited, because they need Rust and PlatformIO gates that the review environment did not have. Q1: `main.cpp:43 requiresResponse` duplicates the diagnostic-validity rule that `HaloState.cpp:245` also applies. Q2: `manager.rs:507 report_protocol_diagnostic` duplicates the encode/write/reconnect path of `manager.rs:427 begin_request`. Q3: the firmware heartbeat branch writes `type` and `sequence` on a response whose `shouldSend` stays false. Q4: `HaloState.cpp:386` and `:391` index the four diagnostic slots with `code - 1` without a static bound. Q5: `KnobInput` does not document that implementations must latch events until polled, which `main.cpp:122` relies on. Q6: the Rust `TryFrom` impls for `DiagnosticSeverity` and `DiagnosticCode` use `()` as the error type.
+- The macOS working copy at `/Users/mac/Desktop/codex-halo` originally had no `.git`; on 2026-08-13 it was re-attached to `https://github.com/hur26/codex-.git` and fast-forwarded to `419f740`. It is configured with `core.autocrlf=input` (the repository stores LF; the Windows checkout produced CRLF) and `core.fileMode=false` (the transfer archive set every file to 0777); without both settings roughly 3000 lines of spurious diff appear. It still has no Rust toolchain, no PlatformIO, and no installed `node_modules`, so only the Python regression can be rerun there: `python3 -m unittest discover -s tests -p 'test_*.py'` gives 64 tests OK, with no skip, because the Windows-only symlink skip does not apply on macOS. Every other gate below reflects the Windows run and was not re-executed on macOS.
 - Tasks 1-12 are implemented, tested, and committed. Overall review and its focused quality review found three protocol consistency gaps; all have TDD fixes and passed independent specification and code-quality re-review.
 - The approved v0.1 finite bidirectional `DIAGNOSTICS` path is implemented. Rust and C++ share a strict 7-byte typed payload; valid diagnostics are silent and do not create ACK loops; invalid desktop diagnostics are safely NACKed; desktop protocol-error reports are limited to one per manager step and use the existing reconnect path on write failure.
 - Firmware keeps four fixed coalescing diagnostic slots rather than an unbounded queue. CRC and malformed counts saturate, watchdog and local-limit reports track edges/latest values, TX backpressure retains pending diagnostics, and diagnostics share the device event sequence with knob events only after successful enqueue.
@@ -71,7 +85,7 @@ $env:PATH = 'D:\DevTools\CLion 2026.1\bin\mingw\bin;' + $env:PATH
 - The privacy scan has seven allowed test-only/negative-assertion matching lines and no task identity or USB serial number in device payloads, device diagnostics, or firmware state.
 - Firmware artifact: `firmware/halo-esp32s3/.pio/build/waveshare_amoled_143/firmware.bin`, 281648 bytes, SHA-256 `0C4592FD24A3AB143EB33764BB7170A34F9791F048570221C13B0B2CE32AC209`.
 - No physical USB, AMOLED, LED ring, knob, power rail, signal level, thermal behavior, enclosure, or four-ring assembly has been verified. The next hardware step is only the minimum one-ring prototype kit from the BOM.
-- Next planned work: push the reviewed diagnostics commit, send the user a concise Chinese development summary, and then prepare the minimum one-ring purchase/assembly session.
+- Next planned work: commit the S1/S2 protocol corrections and this review record, then close S3, S4, and Q1-Q6 with focused TDD, verify that the S1/S2 protocol-document corrections still match both implementations, rerun the overall final review and the full desktop and firmware gates, push `main`, send the user a concise Chinese development summary, and then prepare the minimum one-ring purchase/assembly session. Development may proceed on either environment, but any task touching Rust or firmware requires the corresponding toolchain to be installed first; see the storage policy note below for macOS.
 
 ## Previous Progress Snapshot
 
