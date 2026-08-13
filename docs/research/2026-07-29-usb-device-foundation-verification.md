@@ -13,8 +13,11 @@ USB 设备基础计划的无硬件门禁全部通过。桌面端 Python、Vue/Ty
 脱敏快照、增量更新、旋钮事件、两次重试、断线重连、CRC 故障恢复和版本不兼容
 停写。生产 worker 迭代还验证了 CRC 故障后继续同步。Rust 与 C++ 测试读取同一
 份 4 条有效帧黄金 TSV 和同一份 3 条异常流 TSV；异常流锁定了 CRC 失败后的
-逐字节重同步，以及严格 v0.1 固定载荷长度的提前拒绝。隐私扫描没有发现任务身份或
-USB 序列号进入设备载荷、设备诊断或固件状态。
+逐字节重同步，以及严格 v0.1 固定载荷长度的提前拒绝。有限的双向 `DIAGNOSTICS`
+路径也已实现并通过回归：桌面端和固件共享严格 7 字节载荷语义，设备端诊断使用与
+旋钮事件共享的单调序号，协议错误报告被限流并在背压时保留，桌面端只显示固定、
+去值、脱敏的诊断文案。隐私扫描没有发现任务身份或 USB 序列号进入设备载荷、
+设备诊断或固件状态。
 
 这些结果只证明协议、状态机、模拟传输、UI 合约和目标固件能够在无硬件环境中
 通过自动验证。它们不代表真实 USB CDC、实体 AMOLED、实体灯环、实体旋钮或
@@ -45,25 +48,25 @@ USB 序列号进入设备载荷、设备诊断或固件状态。
 | # | 命令 | 退出码 | 结果 |
 |---:|---|---:|---|
 | 1 | `python -m unittest discover -s tests -p 'test_*.py'` | 0 | 64 项运行：63 通过、1 跳过；耗时 6.642 s |
-| 2 | `npm test --prefix apps/desktop` | 0 | 12 个测试文件、180 项测试全部通过 |
+| 2 | `npm test --prefix apps/desktop` | 0 | 12 个测试文件、184 项测试全部通过 |
 | 3 | `npm run typecheck --prefix apps/desktop` | 0 | `vue-tsc --noEmit` 通过 |
 | 4 | `npm run build --prefix apps/desktop` | 0 | 类型检查和 Vite production build 通过，转换 42 个模块 |
-| 5 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | 0 | Rust 132 项全部通过；main 和 doc tests 各 0 项 |
+| 5 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | 0 | Rust 142 项全部通过；main 和 doc tests 各 0 项 |
 | 6 | `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings` | 0 | 通过 |
 | 7 | `python -m platformio --version` | 0 | `PlatformIO Core, version 6.1.19` |
-| 8 | `python -m platformio test -e native` | 0 | 3 个测试组、39/39 通过：HAL 4、协议 19、状态 16 |
-| 9 | `python -m platformio run -e waveshare_amoled_143` | 0 | Espressif32 7.0.1，目标构建成功；RAM 19,708/327,680 字节，Flash 280,333/6,553,600 字节 |
+| 8 | `python -m platformio test -e native` | 0 | 3 个测试组、47/47 通过：HAL 6、协议 19、状态 22 |
+| 9 | `python -m platformio run -e waveshare_amoled_143` | 0 | Espressif32 7.0.1，目标构建成功；RAM 19,764/327,680 字节，Flash 281,277/6,553,600 字节 |
 
 第 7～9 项在 `firmware/halo-esp32s3` 下执行。Python 唯一跳过项是 Windows
 会话无法创建符号链接时主动跳过的 Hook 安装测试；其余安装器和路径安全测试
 均实际运行。Rust 测试日志中的 MSVC linker stdout 仅说明正在创建 import
-library；随后 132 项测试通过，且独立的 Clippy `-D warnings` 和
+library；随后 142 项测试通过，且独立的 Clippy `-D warnings` 和
 `cargo fmt -- --check` 门禁均为 0。
 
 ## 十个模拟设备场景
 
 全量 Rust 门禁已经运行以下测试。本节另外执行了聚焦回归：worker CRC 1/1、
-manager 20/20、simulator 13/13、表冠模式/环绕 1/1、四圈脱敏投影 1/1，均为
+manager 25/25、simulator 16/16、表冠模式/环绕 1/1、四圈脱敏投影 1/1，均为
 退出码 0。
 
 ```powershell
@@ -89,8 +92,8 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml device::presentatio
 
 ## 故障注入
 
-模拟传输的故障队列按 FIFO、一次性消费，相关 simulator 聚焦测试 13/13 和
-manager 聚焦测试 20/20 全部通过：
+模拟传输的故障队列按 FIFO、一次性消费，相关 simulator 聚焦测试 16/16 和
+manager 聚焦测试 25/25 全部通过：
 
 - `TimeoutOnce`：连续 3 次超时只形成 2 次重试，随后重连并恢复完整快照；
 - `NackOnce(Busy)`：单次 NACK 不应用被拒绝的写入；连续 NACK 同样只重试
@@ -108,6 +111,37 @@ manager 聚焦测试 20/20 全部通过：
 结构化错误、严格 v0.1 固定载荷长度恢复、ACK/NACK 队列背压，以及版本错误进入
 安全状态。
 
+## 有限双向诊断路径
+
+协议中的 `DIAGNOSTICS` 现已从声明但未贯通的消息类型变成有限、可测试的双向路径：
+
+- Rust 与 C++ 均按 `severity:u8 + code:u16 LE + value:u32 LE` 编解码严格 7 字节载荷，
+  未知严重级别、未知代码和错误长度都会被拒绝；
+- 桌面端在 CRC 或其他可报告协议错误后，每次 manager step 最多发送一条诊断，
+  不等待 ACK、不占用正常重试状态；发送失败复用现有安全重连路径；
+- 固件只保留按 4 个固定代码索引的有界待发送槽位。CRC/无效载荷按饱和计数合并，
+  看门狗断开和本地亮度限制按状态边沿或最新值合并，不分配无界队列；
+- 固件诊断与旋钮事件共享设备事件序号，只有整帧成功进入发送队列后才递增；
+  ACK/NACK 优先于诊断，诊断优先于旋钮，发送队列满时诊断仍保留在控制器中；
+- 双方收到有效诊断都静默消费，不回复 ACK，也不会刷新固件看门狗或改变权威显示状态；
+  无效桌面诊断由固件安全 NACK 并合并为无效载荷诊断，因此不会形成回复循环；
+- 设备上报的数值不会进入 UI。Rust 只映射为 4 条固定、去值、脱敏消息，Vue
+  allowlist 允许这些固定消息并继续隐藏任何未知非空文本。
+
+TDD RED 分别复现了 Rust 缺少诊断类型、模拟器无法注入真实诊断、manager 忽略
+设备诊断、UI 隐藏预期安全消息、诊断写失败未覆盖，以及固件缺少类型、生产者、
+有界队列和共享事件序号。GREEN 后相关用例包含在 Rust 142/142、Vitest 184/184
+和固件 native 47/47 中；最后的背压复查还补充验证了无效诊断会先预留 NACK
+容量，避免发送队列满时重复处理和重复计数。
+
+独立规格审查随后发现，不兼容状态的前置门禁会在解析前把合法诊断错误拒绝为
+`InvalidState`。新增聚焦 RED 在 `UnsupportedVersion` 进入安全状态后复现了该
+NACK；最小修复只允许 `Hello` 与 `Diagnostics` 进入各自分支。GREEN 证明合法
+诊断仍静默且不恢复兼容状态、不刷新通信、不改变安全状态、不清除待发送诊断；
+非法诊断仍结构化拒绝为 `MalformedPayload`，合法与非法诊断之后的心跳均继续被
+`InvalidState` 阻止，直接证明兼容状态没有被恢复。修复后状态聚焦 22/22、固件
+全量 47/47 和目标构建均通过。
+
 ## 共享黄金向量与异常流
 
 唯一来源是：
@@ -116,10 +150,10 @@ manager 聚焦测试 20/20 全部通过：
 
 - Rust `device::protocol::tests::encodes_and_decodes_all_published_golden_vectors`
   通过 `include_str!("../../../../../docs/protocol/golden-vectors.tsv")` 读取该文件，
-  在全量 132 项中通过；
+  在全量 142 项中通过；
 - C++ `test_all_shared_golden_vectors_encode_and_decode` 通过
   `std::ifstream("../../docs/protocol/golden-vectors.tsv")` 读取同一文件，在 native
-  39 项中通过。
+  47 项中通过。
 
 异常流的唯一来源是
 `D:\Project\codex-halo\docs\protocol\decoder-stream-vectors.tsv`，包含 3 条：
@@ -152,9 +186,9 @@ rg -n "taskKey|task_key|serial_number|serialNumber" `
 
 | 命中 | 解释 |
 |---|---|
-| `manager.rs:592 task_key: None` | manager 测试夹具明确构造无任务身份的槽位，不进入设备载荷 |
-| `manager.rs:1032 taskKey` | 负向断言：序列化设备状态不得包含 `taskKey` |
-| `manager.rs:1033 serialNumber` | 负向断言：序列化设备状态不得包含 `serialNumber` |
+| `manager.rs:671 task_key: None` | manager 测试夹具明确构造无任务身份的槽位，不进入设备载荷 |
+| `manager.rs:1270 taskKey` | 负向断言：序列化设备状态不得包含 `taskKey` |
+| `manager.rs:1271 serialNumber` | 负向断言：序列化设备状态不得包含 `serialNumber` |
 | `presentation.rs:348 task_key: Some(...)` | 脱敏投影测试故意在领域夹具放入 TaskKey，随后断言设备载荷不含该值且所有 label 为空 |
 | `serial.rs:252 serial_number` | 测试帮助函数的可选参数，只用于构造含虚构 USB 序列号的第三方 `UsbPortInfo` 测试值 |
 | `serial.rs:259 serial_number` | 同一测试帮助函数把虚构值复制进第三方测试结构，随后转换为生产候选项以验证序列号被丢弃；不是设备载荷或生产状态字段 |
@@ -168,7 +202,7 @@ rg -n "taskKey|task_key|serial_number|serialNumber" `
 
 | 产物 | 字节数 | SHA-256 |
 |---|---:|---|
-| `D:\Project\codex-halo\firmware\halo-esp32s3\.pio\build\waveshare_amoled_143\firmware.bin` | 280,704 | `C7F17EB6400C6875855428123704918A989D5CEBFDE0E66EB08FE2A9CA1F51E6` |
+| `D:\Project\codex-halo\firmware\halo-esp32s3\.pio\build\waveshare_amoled_143\firmware.bin` | 281,648 | `0C4592FD24A3AB143EB33764BB7170A34F9791F048570221C13B0B2CE32AC209` |
 
 产物信息由 PowerShell `Resolve-Path`、`Get-Item` 和
 `Get-FileHash -Algorithm SHA256` 从上述 `firmware.bin` 直接读取，命令退出码 0。
@@ -224,3 +258,9 @@ worker 边界 CRC 证据，因此从生产 `run_device_manager` 提取并复用�
 新增测试分别覆盖裸任务指纹、提示词、Windows/Unix 串口、任意 USB 序列号和原始
 帧十六进制，前端全量 180/180、类型检查和生产构建均通过。该修复通过独立规格与
 代码质量审查。
+
+本轮随后补齐批准设计要求的有限双向诊断路径。诊断实现的 RED/GREEN、背压、
+限流、共享序号、静默消费、固定 UI 文案和隐私边界均已通过上述自动化门禁；更新后
+全量结果为 Rust 142/142、Vitest 184/184、固件 native 47/47，目标构建成功。
+该路径仍只经过模拟传输、原生状态机测试和目标编译，不能视为真实 USB CDC
+双向诊断已经在实体板上验证。

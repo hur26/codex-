@@ -3,7 +3,10 @@
 #include <HaloProtocol.hpp>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <vector>
 
 namespace halo {
 
@@ -39,6 +42,29 @@ enum class NackReason : uint8_t {
   InvalidState = 3,
   Busy = 4,
   InternalError = 5,
+};
+
+enum class DiagnosticSeverity : uint8_t {
+  Info = 1,
+  Warning = 2,
+  Error = 3,
+};
+
+enum class DiagnosticCode : uint16_t {
+  WatchdogDisconnected = 1,
+  CrcError = 2,
+  InvalidPayload = 3,
+  LocalLimit = 4,
+};
+
+struct Diagnostic {
+  DiagnosticSeverity severity{DiagnosticSeverity::Info};
+  DiagnosticCode code{DiagnosticCode::WatchdogDisconnected};
+  uint32_t value{0};
+
+  std::vector<uint8_t> encodePayload() const;
+  static std::optional<Diagnostic> decodePayload(
+      const std::vector<uint8_t>& payload);
 };
 
 enum class KnobAction : uint8_t {
@@ -96,12 +122,17 @@ class DeviceController {
   bool tick(uint32_t nowMs);
 
   const DeviceState& state() const { return state_; }
+  std::optional<Diagnostic> pendingDiagnostic() const;
+  size_t pendingDiagnosticCount() const;
+  void popPendingDiagnostic();
 
  private:
   ControllerResponse acknowledge(const Frame& frame, bool stateChanged);
   ControllerResponse reject(const Frame& frame, NackReason reason);
   bool markCommunication(uint32_t nowMs);
   void updateEffectiveBrightness();
+  void queueDiagnostic(Diagnostic diagnostic);
+  void incrementDiagnostic(DiagnosticCode code);
 
   DeviceState state_{};
   PowerPolicy powerPolicy_{};
@@ -109,6 +140,9 @@ class DeviceController {
   uint32_t lastCommunicationMs_{0};
   bool communicationStarted_{false};
   bool protocolCompatible_{true};
+  bool localLimitActive_{false};
+  uint8_t lastLocalLimitValue_{0};
+  std::array<std::optional<Diagnostic>, 4> pendingDiagnostics_{};
 };
 
 }  // namespace halo

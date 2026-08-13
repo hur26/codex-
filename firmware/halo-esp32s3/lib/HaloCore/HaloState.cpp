@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 
 namespace halo {
 namespace {
@@ -16,6 +17,18 @@ uint16_t readUint16Le(const uint8_t* bytes) {
   return static_cast<uint16_t>(bytes[0]) |
          static_cast<uint16_t>(static_cast<uint16_t>(bytes[1]) << 8);
 }
+
+uint32_t readUint32Le(const uint8_t* bytes) {
+  uint32_t value = 0;
+  for (uint8_t index = 0; index < 4; ++index) {
+    value |= static_cast<uint32_t>(bytes[index]) << (index * 8);
+  }
+  return value;
+}
+
+bool validDiagnosticSeverity(uint8_t value) { return value >= 1 && value <= 3; }
+
+bool validDiagnosticCode(uint16_t value) { return value >= 1 && value <= 4; }
 
 uint64_t readUint64Le(const uint8_t* bytes) {
   uint64_t value = 0;
@@ -73,6 +86,33 @@ ControllerResponse makeResponse(const Frame& request, MessageType type,
 
 }  // namespace
 
+std::vector<uint8_t> Diagnostic::encodePayload() const {
+  const uint16_t rawCode = static_cast<uint16_t>(code);
+  return {
+      static_cast<uint8_t>(severity),
+      static_cast<uint8_t>(rawCode & 0xff),
+      static_cast<uint8_t>(rawCode >> 8),
+      static_cast<uint8_t>(value & 0xff),
+      static_cast<uint8_t>((value >> 8) & 0xff),
+      static_cast<uint8_t>((value >> 16) & 0xff),
+      static_cast<uint8_t>((value >> 24) & 0xff),
+  };
+}
+
+std::optional<Diagnostic> Diagnostic::decodePayload(
+    const std::vector<uint8_t>& payload) {
+  if (payload.size() != 7 || !validDiagnosticSeverity(payload[0])) {
+    return std::nullopt;
+  }
+  const uint16_t rawCode = readUint16Le(payload.data() + 1);
+  if (!validDiagnosticCode(rawCode)) {
+    return std::nullopt;
+  }
+  return Diagnostic{static_cast<DiagnosticSeverity>(payload[0]),
+                    static_cast<DiagnosticCode>(rawCode),
+                    readUint32Le(payload.data() + 3)};
+}
+
 uint8_t PowerPolicy::limitBrightness(uint8_t requestedBrightness,
                                      uint16_t ledCount) const {
   if (ledCount == 0 || maxMilliAmps == 0 || brightnessCeiling == 0) {
@@ -98,7 +138,8 @@ DeviceController::DeviceController(PowerPolicy powerPolicy,
 
 ControllerResponse DeviceController::handle(const Frame& frame,
                                             uint32_t nowMs) {
-  if (!protocolCompatible_ && frame.type != MessageType::Hello) {
+  if (!protocolCompatible_ && frame.type != MessageType::Hello &&
+      frame.type != MessageType::Diagnostics) {
     return reject(frame, NackReason::InvalidState);
   }
 
@@ -201,11 +242,17 @@ ControllerResponse DeviceController::handle(const Frame& frame,
       return response;
     }
 
+    case MessageType::Diagnostics: {
+      if (!Diagnostic::decodePayload(frame.payload).has_value()) {
+        return reject(frame, NackReason::MalformedPayload);
+      }
+      return {};
+    }
+
     case MessageType::Capabilities:
     case MessageType::Ack:
     case MessageType::Nack:
     case MessageType::KnobEvent:
-    case MessageType::Diagnostics:
       return reject(frame, NackReason::UnsupportedMessage);
   }
 
@@ -228,6 +275,13 @@ ControllerResponse DeviceController::handleProtocolError(
     response.stateChanged = stateChanged;
     return response;
   }
+
+  if (result.error == ProtocolError::CrcMismatch) {
+    incrementDiagnostic(DiagnosticCode::CrcError);
+    return {};
+  }
+
+  incrementDiagnostic(DiagnosticCode::InvalidPayload);
 
   if (!result.context.respondable) {
     return {};
@@ -254,6 +308,9 @@ bool DeviceController::tick(uint32_t nowMs) {
 
   state_.disconnected = true;
   updateEffectiveBrightness();
+  queueDiagnostic({DiagnosticSeverity::Warning,
+                   DiagnosticCode::WatchdogDisconnected,
+                   kWatchdogTimeoutMs});
   return true;
 }
 
@@ -264,7 +321,10 @@ ControllerResponse DeviceController::acknowledge(const Frame& frame,
 }
 
 ControllerResponse DeviceController::reject(const Frame& frame,
-                                            NackReason reason) {
+                                             NackReason reason) {
+  if (reason == NackReason::MalformedPayload) {
+    incrementDiagnostic(DiagnosticCode::InvalidPayload);
+  }
   return makeResponse(frame, MessageType::Nack,
                       {static_cast<uint8_t>(frame.type),
                        static_cast<uint8_t>(reason)},
@@ -287,6 +347,55 @@ void DeviceController::updateEffectiveBrightness() {
       state_.globalBrightness, estimatedLedCount_);
   state_.effectiveBrightness =
       state_.disconnected ? std::min(limited, kDisconnectedBrightness) : limited;
+  const bool localLimitActive = state_.authoritative && !state_.disconnected &&
+                                limited < state_.globalBrightness;
+  if (localLimitActive &&
+      (!localLimitActive_ || lastLocalLimitValue_ != limited)) {
+    queueDiagnostic({DiagnosticSeverity::Info, DiagnosticCode::LocalLimit,
+                     limited});
+  }
+  localLimitActive_ = localLimitActive;
+  lastLocalLimitValue_ = limited;
+}
+
+std::optional<Diagnostic> DeviceController::pendingDiagnostic() const {
+  for (const auto& diagnostic : pendingDiagnostics_) {
+    if (diagnostic.has_value()) {
+      return diagnostic;
+    }
+  }
+  return std::nullopt;
+}
+
+size_t DeviceController::pendingDiagnosticCount() const {
+  return static_cast<size_t>(std::count_if(
+      pendingDiagnostics_.begin(), pendingDiagnostics_.end(),
+      [](const auto& diagnostic) { return diagnostic.has_value(); }));
+}
+
+void DeviceController::popPendingDiagnostic() {
+  for (auto& diagnostic : pendingDiagnostics_) {
+    if (diagnostic.has_value()) {
+      diagnostic.reset();
+      return;
+    }
+  }
+}
+
+void DeviceController::queueDiagnostic(Diagnostic diagnostic) {
+  const size_t index = static_cast<size_t>(diagnostic.code) - 1;
+  pendingDiagnostics_[index] = diagnostic;
+}
+
+void DeviceController::incrementDiagnostic(DiagnosticCode code) {
+  const size_t index = static_cast<size_t>(code) - 1;
+  const uint32_t previous = pendingDiagnostics_[index].has_value()
+                                ? pendingDiagnostics_[index]->value
+                                : 0;
+  pendingDiagnostics_[index] = {
+      DiagnosticSeverity::Warning, code,
+      previous == std::numeric_limits<uint32_t>::max() ? previous
+                                                       : previous + 1};
 }
 
 }  // namespace halo

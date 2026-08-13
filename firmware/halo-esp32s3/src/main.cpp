@@ -23,8 +23,8 @@ halo::NullRingRenderer ringRenderer;
 halo::NullDisplayRenderer displayRenderer;
 halo::NullKnobInput knobInput;
 halo::TxPump transmitPump;
+halo::DeviceEventSender eventSender;
 SerialWriter serialWriter;
-uint16_t nextKnobSequence = 0;
 std::vector<halo::DecodeResult> pendingDecoded;
 size_t pendingDecodedIndex = 0;
 
@@ -34,9 +34,16 @@ void applyState() {
 }
 
 bool requiresResponse(const halo::DecodeResult& decoded) {
-  return decoded.ok()
-             ? decoded.frame.type != halo::MessageType::Heartbeat
-             : decoded.context.respondable;
+  if (!decoded.ok()) {
+    return decoded.context.respondable;
+  }
+  if (decoded.frame.type == halo::MessageType::Heartbeat) {
+    return false;
+  }
+  if (decoded.frame.type == halo::MessageType::Diagnostics) {
+    return !halo::Diagnostic::decodePayload(decoded.frame.payload).has_value();
+  }
+  return true;
 }
 
 void processDecoded(uint32_t nowMs) {
@@ -83,14 +90,13 @@ void reportKnob(uint32_t nowMs) {
     return;
   }
 
-  halo::Frame frame;
-  frame.type = halo::MessageType::KnobEvent;
-  frame.sequence = nextKnobSequence++;
-  frame.payload = {static_cast<uint8_t>(event->action),
-                   static_cast<uint8_t>(event->delta)};
-  if (!transmitPump.enqueue(frame)) {
-    --nextKnobSequence;
-  }
+  eventSender.enqueue(transmitPump, halo::MessageType::KnobEvent,
+                      {static_cast<uint8_t>(event->action),
+                       static_cast<uint8_t>(event->delta)});
+}
+
+void reportDiagnostic() {
+  eventSender.enqueuePendingDiagnostic(transmitPump, controller);
 }
 
 }  // namespace
@@ -112,7 +118,8 @@ void loop() {
     applyState();
   }
   ringRenderer.tick(nowMs);
-  if (!transmitPump.full()) {
+  reportDiagnostic();
+  if (!controller.pendingDiagnostic().has_value() && !transmitPump.full()) {
     reportKnob(nowMs);
   }
   transmitPump.pump(serialWriter);

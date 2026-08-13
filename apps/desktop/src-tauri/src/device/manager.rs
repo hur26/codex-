@@ -1,6 +1,7 @@
 use crate::device::presentation::{DeviceSnapshot, DeviceUpdate};
 use crate::device::protocol::{
-    self, Decoder, DecoderMode, Frame, MessageType, ProtocolError, MAX_PAYLOAD,
+    self, Decoder, DecoderMode, Diagnostic, DiagnosticCode, DiagnosticSeverity, Frame, MessageType,
+    ProtocolError, MAX_PAYLOAD,
 };
 use crate::device::transport::{DeviceTransport, TransportError, TransportKind};
 use crate::domain::model::{HaloSnapshot, PresentationIntent};
@@ -102,6 +103,7 @@ pub struct DeviceManager<T: DeviceTransport> {
     next_sequence: u16,
     last_heartbeat_ms: Option<u64>,
     last_knob_sequence: Option<u16>,
+    last_diagnostic_message: Option<&'static str>,
     ever_connected: bool,
 }
 
@@ -128,6 +130,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
             next_sequence: 0,
             last_heartbeat_ms: None,
             last_knob_sequence: None,
+            last_diagnostic_message: None,
             ever_connected: false,
         }
     }
@@ -151,6 +154,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
     pub fn step(&mut self, now_ms: u64, snapshot: &HaloSnapshot) -> StepResult {
         let status_before = self.status.clone();
         let mut intents = Vec::new();
+        let mut diagnostic_sent = false;
 
         if self.phase != ManagerPhase::Incompatible {
             if !self.transport.is_connected() {
@@ -159,12 +163,12 @@ impl<T: DeviceTransport> DeviceManager<T> {
             if self.phase == ManagerPhase::Disconnected {
                 self.connect(now_ms);
             }
-            self.pump_reads(now_ms, snapshot, &mut intents);
+            self.pump_reads(now_ms, snapshot, &mut intents, &mut diagnostic_sent);
             self.retry_if_timed_out(now_ms);
 
             if self.phase == ManagerPhase::Ready && self.pending.is_none() {
                 self.queue_changed_snapshot(now_ms, snapshot);
-                self.pump_reads(now_ms, snapshot, &mut intents);
+                self.pump_reads(now_ms, snapshot, &mut intents, &mut diagnostic_sent);
             }
 
             if self.phase == ManagerPhase::Ready {
@@ -230,6 +234,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
         now_ms: u64,
         snapshot: &HaloSnapshot,
         intents: &mut Vec<PresentationIntent>,
+        diagnostic_sent: &mut bool,
     ) {
         for _ in 0..MAX_READS_PER_STEP {
             let bytes = match self.transport.read() {
@@ -250,13 +255,28 @@ impl<T: DeviceTransport> DeviceManager<T> {
             let decoded = self.decoder.push(&bytes);
             for result in decoded {
                 match result {
-                    Ok(frame) => self.handle_frame(frame, batch_request, now_ms, snapshot, intents),
+                    Ok(frame) => self.handle_frame(
+                        frame,
+                        batch_request,
+                        now_ms,
+                        snapshot,
+                        intents,
+                        diagnostic_sent,
+                    ),
                     Err(ProtocolError::UnsupportedVersion { .. }) => {
                         self.mark_incompatible("Protocol major is incompatible");
                     }
-                    Err(_) => {}
+                    Err(ProtocolError::CrcMismatch) => {
+                        self.report_protocol_diagnostic(DiagnosticCode::CrcError, diagnostic_sent);
+                    }
+                    Err(_) => {
+                        self.report_protocol_diagnostic(
+                            DiagnosticCode::InvalidPayload,
+                            diagnostic_sent,
+                        );
+                    }
                 }
-                if self.phase == ManagerPhase::Incompatible {
+                if self.phase == ManagerPhase::Incompatible || !self.transport.is_connected() {
                     return;
                 }
             }
@@ -270,7 +290,19 @@ impl<T: DeviceTransport> DeviceManager<T> {
         now_ms: u64,
         snapshot: &HaloSnapshot,
         intents: &mut Vec<PresentationIntent>,
+        diagnostic_sent: &mut bool,
     ) {
+        if frame.message_type == MessageType::Diagnostics {
+            if let Some(diagnostic) = Diagnostic::decode_payload(&frame.payload) {
+                let message = diagnostic_message(diagnostic.code);
+                self.last_diagnostic_message = Some(message);
+                self.status.message = Some(message.to_owned());
+            } else {
+                self.report_protocol_diagnostic(DiagnosticCode::InvalidPayload, diagnostic_sent);
+            }
+            return;
+        }
+
         if frame.message_type == MessageType::KnobEvent {
             if let Some(intent) = self.decode_knob_event(&frame) {
                 intents.push(intent);
@@ -304,7 +336,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
                     && frame.payload == [expected_type as u8] =>
             {
                 self.pending = None;
-                self.status.message = None;
+                self.restore_diagnostic_message();
                 self.begin_next_write(now_ms);
             }
             ExpectedResponse::Ack(expected_type)
@@ -387,6 +419,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
                 TransportKind::Serial => DeviceConnectionState::Online,
             };
             self.status.message = None;
+            self.restore_diagnostic_message();
             self.last_heartbeat_ms = Some(now_ms);
         }
     }
@@ -471,6 +504,40 @@ impl<T: DeviceTransport> DeviceManager<T> {
         }
     }
 
+    fn report_protocol_diagnostic(&mut self, code: DiagnosticCode, diagnostic_sent: &mut bool) {
+        if *diagnostic_sent || !self.transport.is_connected() {
+            return;
+        }
+        let sequence = self.next_sequence;
+        let frame = Frame::new(
+            MessageType::Diagnostics,
+            sequence,
+            Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                code,
+                value: 1,
+            }
+            .encode_payload(),
+        );
+        let bytes = match protocol::encode(&frame) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                self.force_reconnect("Device frame could not be encoded");
+                return;
+            }
+        };
+        if self.transport.write(&bytes).is_err() {
+            self.force_reconnect("Device write failed");
+            return;
+        }
+        self.next_sequence = sequence.wrapping_add(1);
+        *diagnostic_sent = true;
+    }
+
+    fn restore_diagnostic_message(&mut self) {
+        self.status.message = self.last_diagnostic_message.map(str::to_owned);
+    }
+
     fn decode_knob_event(&mut self, frame: &Frame) -> Option<PresentationIntent> {
         if !sequence_is_newer(self.last_knob_sequence, frame.sequence) {
             return None;
@@ -514,6 +581,7 @@ impl<T: DeviceTransport> DeviceManager<T> {
         self.applied_snapshot = None;
         self.last_heartbeat_ms = None;
         self.last_knob_sequence = None;
+        self.last_diagnostic_message = None;
         self.phase = ManagerPhase::Disconnected;
     }
 
@@ -539,6 +607,15 @@ fn parse_capabilities(payload: &[u8], required_payload: usize) -> Option<String>
         return None;
     }
     Some(format!("{}.{}.{}", payload[1], payload[2], payload[3]))
+}
+
+fn diagnostic_message(code: DiagnosticCode) -> &'static str {
+    match code {
+        DiagnosticCode::WatchdogDisconnected => "Device watchdog entered disconnected state",
+        DiagnosticCode::CrcError => "Device reported a CRC error",
+        DiagnosticCode::InvalidPayload => "Device reported an invalid payload",
+        DiagnosticCode::LocalLimit => "Device local power or brightness limit is active",
+    }
 }
 
 fn valid_nack_payload(payload: &[u8], expected_type: MessageType) -> bool {
@@ -570,7 +647,9 @@ fn sequence_is_newer(previous: Option<u16>, candidate: u16) -> bool {
 mod tests {
     use super::{DeviceConnectionState, DeviceManager};
     use crate::device::presentation::DeviceSnapshot;
-    use crate::device::protocol::{self, Frame, MessageType};
+    use crate::device::protocol::{
+        self, Diagnostic, DiagnosticCode, DiagnosticSeverity, Frame, MessageType,
+    };
     use crate::device::simulator::{Fault, KnobEvent, SimulatedTransport};
     use crate::device::transport::DeviceTransport;
     use crate::domain::effects::EffectProfile;
@@ -738,6 +817,165 @@ mod tests {
                 PresentationIntent::Rotate(-1)
             ]
         );
+    }
+
+    #[test]
+    fn diagnostic_before_pending_ack_is_silent_and_persists_after_ack() {
+        let mut manager = online_manager();
+        manager.transport_mut().script(Fault::TimeoutOnce);
+        let mut changed = fixture_halo_snapshot();
+        changed.revision = 2;
+        changed.global_brightness = 50;
+        manager.step(10, &changed);
+        assert!(manager.pending.is_some());
+
+        manager
+            .transport_mut()
+            .inject_diagnostic(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                code: DiagnosticCode::CrcError,
+                value: u32::MAX,
+            })
+            .unwrap();
+        let result = manager.step(11, &changed);
+
+        assert!(result.intents.is_empty());
+        assert_eq!(manager.status().state, DeviceConnectionState::Virtual);
+        assert_eq!(manager.metrics().retry_count, 0);
+        assert!(manager.pending.is_some());
+        assert_eq!(
+            manager.status().message.as_deref(),
+            Some("Device reported a CRC error")
+        );
+        assert!(!manager
+            .status()
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("4294967295"));
+
+        manager.step(260, &changed);
+        manager.step(261, &changed);
+        assert!(manager.pending.is_none());
+        assert_eq!(manager.metrics().retry_count, 1);
+        assert_eq!(
+            manager.status().message.as_deref(),
+            Some("Device reported a CRC error")
+        );
+    }
+
+    #[test]
+    fn all_valid_device_diagnostics_map_to_fixed_value_free_messages() {
+        let cases = [
+            (
+                DiagnosticCode::WatchdogDisconnected,
+                "Device watchdog entered disconnected state",
+            ),
+            (DiagnosticCode::CrcError, "Device reported a CRC error"),
+            (
+                DiagnosticCode::InvalidPayload,
+                "Device reported an invalid payload",
+            ),
+            (
+                DiagnosticCode::LocalLimit,
+                "Device local power or brightness limit is active",
+            ),
+        ];
+
+        for (code, message) in cases {
+            let mut manager = online_manager();
+            manager
+                .transport_mut()
+                .inject_diagnostic(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    code,
+                    value: u32::MAX,
+                })
+                .unwrap();
+
+            manager.step(10, &fixture_halo_snapshot());
+
+            assert_eq!(manager.status().message.as_deref(), Some(message));
+            assert!(!manager
+                .status()
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("4294967295"));
+        }
+    }
+
+    #[test]
+    fn decoder_errors_send_at_most_one_safe_diagnostic_per_step() {
+        let mut manager = online_manager();
+        let mut first = protocol::encode(&Frame::new(MessageType::Heartbeat, 90, vec![])).unwrap();
+        *first.last_mut().unwrap() ^= 0xff;
+        let mut second = protocol::encode(&Frame::new(MessageType::Heartbeat, 91, vec![])).unwrap();
+        *second.last_mut().unwrap() ^= 0xff;
+        first.extend(second);
+        manager.transport_mut().queue_raw_response(first);
+
+        manager.step(10, &fixture_halo_snapshot());
+
+        assert_eq!(manager.transport().diagnostic_write_count(), 1);
+        assert_eq!(
+            manager.transport().last_received_diagnostic(),
+            Some(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                code: DiagnosticCode::CrcError,
+                value: 1,
+            })
+        );
+        assert_eq!(manager.status().state, DeviceConnectionState::Virtual);
+        assert_eq!(manager.metrics().retry_count, 0);
+    }
+
+    #[test]
+    fn invalid_device_diagnostic_reports_format_error_without_a_reply_loop() {
+        let mut manager = online_manager();
+        manager.transport_mut().queue_raw_response(
+            protocol::encode(&Frame::new(
+                MessageType::Diagnostics,
+                92,
+                vec![DiagnosticSeverity::Warning as u8, 5, 0, 0, 0, 0, 0],
+            ))
+            .unwrap(),
+        );
+
+        manager.step(10, &fixture_halo_snapshot());
+
+        assert_eq!(manager.status().message, None);
+        assert_eq!(manager.transport().diagnostic_write_count(), 1);
+        assert_eq!(
+            manager.transport().last_received_diagnostic(),
+            Some(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                code: DiagnosticCode::InvalidPayload,
+                value: 1,
+            })
+        );
+        assert!(manager.transport_mut().read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn diagnostic_write_failure_uses_the_existing_safe_reconnect_path() {
+        let mut manager = online_manager();
+        manager
+            .transport_mut()
+            .script(Fault::DiagnosticWriteErrorOnce);
+        let mut corrupt =
+            protocol::encode(&Frame::new(MessageType::Heartbeat, 93, vec![])).unwrap();
+        *corrupt.last_mut().unwrap() ^= 0xff;
+        manager.transport_mut().queue_raw_response(corrupt);
+
+        manager.step(10, &fixture_halo_snapshot());
+
+        assert_eq!(manager.status().state, DeviceConnectionState::Error);
+        assert_eq!(
+            manager.status().message.as_deref(),
+            Some("Device write failed")
+        );
+        assert!(!manager.transport().is_connected());
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::device::presentation::{
     DeviceDirection, DeviceDisplayMode, DeviceRing, DeviceSnapshot, DeviceTaskStatus,
 };
 use crate::device::protocol::{
-    self, Decoder, DecoderMode, Frame, MessageType, ProtocolError, PROTOCOL_MAJOR,
+    self, Decoder, DecoderMode, Diagnostic, Frame, MessageType, ProtocolError, PROTOCOL_MAJOR,
 };
 use crate::device::transport::{DeviceTransport, Endpoint, TransportError, TransportKind};
 use std::collections::VecDeque;
@@ -41,6 +41,7 @@ pub enum Fault {
     UnknownNackReasonOnce(u8),
     AckBatchWithFutureOnce(MessageType),
     CorruptCrcOnce,
+    DiagnosticWriteErrorOnce,
 }
 
 struct PendingResponse {
@@ -63,7 +64,9 @@ pub struct SimulatedTransport {
     protocol_major: u8,
     feature_flags: u16,
     max_payload: u16,
-    next_knob_sequence: u16,
+    next_event_sequence: u16,
+    last_received_diagnostic: Option<Diagnostic>,
+    diagnostic_write_count: u32,
     applied_snapshot: Option<DeviceSnapshot>,
     state_write_log: Vec<(MessageType, u16)>,
     state_write_count: usize,
@@ -82,7 +85,9 @@ impl Default for SimulatedTransport {
             protocol_major: PROTOCOL_MAJOR,
             feature_flags: DEFAULT_FEATURE_FLAGS,
             max_payload: DEFAULT_MAX_PAYLOAD,
-            next_knob_sequence: 0,
+            next_event_sequence: 0,
+            last_received_diagnostic: None,
+            diagnostic_write_count: 0,
             applied_snapshot: None,
             state_write_log: Vec::new(),
             state_write_count: 0,
@@ -140,8 +145,30 @@ impl SimulatedTransport {
         self.max_pending_response_count
     }
 
+    pub fn last_received_diagnostic(&self) -> Option<Diagnostic> {
+        self.last_received_diagnostic
+    }
+
+    pub fn diagnostic_write_count(&self) -> u32 {
+        self.diagnostic_write_count
+    }
+
+    pub fn inject_diagnostic(&mut self, diagnostic: Diagnostic) -> Result<(), TransportError> {
+        let sequence = self.next_event_sequence;
+        self.queue_response(
+            Frame::new(
+                MessageType::Diagnostics,
+                sequence,
+                diagnostic.encode_payload(),
+            ),
+            None,
+        )?;
+        self.next_event_sequence = sequence.wrapping_add(1);
+        Ok(())
+    }
+
     pub fn inject_knob(&mut self, event: KnobEvent) -> Result<(), TransportError> {
-        let sequence = self.next_knob_sequence;
+        let sequence = self.next_event_sequence;
         self.inject_knob_with_sequence(sequence, event)
     }
 
@@ -153,13 +180,14 @@ impl SimulatedTransport {
         if event == KnobEvent::Rotate(0) {
             return Err(TransportError::InvalidKnobDelta);
         }
-        self.next_knob_sequence = sequence.wrapping_add(1);
         let payload = match event {
             KnobEvent::Rotate(delta) => vec![0x01, delta as u8],
             KnobEvent::ShortPress => vec![0x02, 0],
             KnobEvent::LongPress => vec![0x03, 0],
         };
-        self.queue_response(Frame::new(MessageType::KnobEvent, sequence, payload), None)
+        self.queue_response(Frame::new(MessageType::KnobEvent, sequence, payload), None)?;
+        self.next_event_sequence = sequence.wrapping_add(1);
+        Ok(())
     }
 
     pub fn applied_snapshot(&self) -> Option<&DeviceSnapshot> {
@@ -167,6 +195,20 @@ impl SimulatedTransport {
     }
 
     fn process_frame(&mut self, frame: Frame) -> Result<(), TransportError> {
+        if frame.message_type == MessageType::Diagnostics {
+            if self.faults.front() == Some(&Fault::DiagnosticWriteErrorOnce) {
+                self.faults.pop_front();
+                return Err(TransportError::Disconnected);
+            }
+            return match Diagnostic::decode_payload(&frame.payload) {
+                Some(diagnostic) => {
+                    self.last_received_diagnostic = Some(diagnostic);
+                    self.diagnostic_write_count = self.diagnostic_write_count.saturating_add(1);
+                    Ok(())
+                }
+                None => self.queue_nack(&frame, NackReason::MalformedPayload, None),
+            };
+        }
         if frame.message_type == MessageType::Heartbeat && frame.payload.is_empty() {
             self.heartbeat_count += 1;
             return Ok(());
@@ -215,6 +257,10 @@ impl SimulatedTransport {
                 Some(ResponseFault::AckBatchWithFuture(message_type))
             }
             Some(Fault::CorruptCrcOnce) => Some(ResponseFault::CorruptCrc),
+            Some(Fault::DiagnosticWriteErrorOnce) => {
+                self.faults.push_front(Fault::DiagnosticWriteErrorOnce);
+                None
+            }
             None => None,
         };
 
@@ -278,10 +324,10 @@ impl SimulatedTransport {
             MessageType::Capabilities
             | MessageType::Ack
             | MessageType::Nack
-            | MessageType::KnobEvent
-            | MessageType::Diagnostics => {
+            | MessageType::KnobEvent => {
                 self.queue_nack(&frame, NackReason::UnsupportedMessage, response_fault)
             }
+            MessageType::Diagnostics => unreachable!("diagnostics return before fault handling"),
         }
     }
 
@@ -373,6 +419,7 @@ impl DeviceTransport for SimulatedTransport {
         self.connected = true;
         self.decoder = Decoder::new(DecoderMode::StrictV01);
         self.responses.clear();
+        self.last_received_diagnostic = None;
         Ok(())
     }
 
@@ -427,6 +474,7 @@ impl DeviceTransport for SimulatedTransport {
         self.connected = false;
         self.decoder = Decoder::new(DecoderMode::StrictV01);
         self.responses.clear();
+        self.last_received_diagnostic = None;
         Ok(())
     }
 
@@ -548,7 +596,10 @@ mod tests {
         DeviceDirection, DeviceDisplayMode, DeviceRing, DeviceSnapshot, DeviceTaskStatus,
         DeviceUpdate,
     };
-    use crate::device::protocol::{self, Decoder, Frame, MessageType, ProtocolError};
+    use crate::device::protocol::{
+        self, Decoder, Diagnostic, DiagnosticCode, DiagnosticSeverity, Frame, MessageType,
+        ProtocolError,
+    };
     use crate::device::transport::{DeviceTransport, Endpoint, TransportError, TransportKind};
 
     fn fixture_device_snapshot() -> DeviceSnapshot {
@@ -617,6 +668,82 @@ mod tests {
             Frame::new(MessageType::Ack, 2, vec![MessageType::FullSnapshot as u8])
         );
         assert_eq!(simulator.applied_snapshot(), Some(&snapshot));
+    }
+
+    #[test]
+    fn valid_desktop_diagnostic_is_silent_and_does_not_consume_a_scripted_fault() {
+        let mut simulator = SimulatedTransport::default();
+        connect(&mut simulator);
+        simulator.script(Fault::TimeoutOnce);
+        let diagnostic = Diagnostic {
+            severity: DiagnosticSeverity::Warning,
+            code: DiagnosticCode::CrcError,
+            value: 3,
+        };
+
+        write_frame(
+            &mut simulator,
+            Frame::new(MessageType::Diagnostics, 7, diagnostic.encode_payload()),
+        );
+
+        assert_eq!(simulator.last_received_diagnostic(), Some(diagnostic));
+        assert_eq!(simulator.diagnostic_write_count(), 1);
+        assert_eq!(simulator.pending_fault_count(), 1);
+        assert_eq!(simulator.state_write_count(), 0);
+        assert!(simulator.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_desktop_diagnostic_is_safely_nacked_without_consuming_a_fault() {
+        let mut simulator = SimulatedTransport::default();
+        connect(&mut simulator);
+        simulator.script(Fault::TimeoutOnce);
+
+        write_frame(
+            &mut simulator,
+            Frame::new(
+                MessageType::Diagnostics,
+                8,
+                vec![DiagnosticSeverity::Warning as u8, 5, 0, 0, 0, 0, 0],
+            ),
+        );
+
+        assert_eq!(
+            decode_one(&simulator.read().unwrap()),
+            Frame::new(
+                MessageType::Nack,
+                8,
+                vec![
+                    MessageType::Diagnostics as u8,
+                    NackReason::MalformedPayload as u8,
+                ],
+            )
+        );
+        assert_eq!(simulator.last_received_diagnostic(), None);
+        assert_eq!(simulator.pending_fault_count(), 1);
+    }
+
+    #[test]
+    fn injected_device_diagnostic_is_a_real_frame_and_shares_event_sequence_with_knob() {
+        let mut simulator = SimulatedTransport::default();
+        connect(&mut simulator);
+        let diagnostic = Diagnostic {
+            severity: DiagnosticSeverity::Info,
+            code: DiagnosticCode::LocalLimit,
+            value: 30,
+        };
+
+        simulator.inject_diagnostic(diagnostic).unwrap();
+        simulator.inject_knob(KnobEvent::ShortPress).unwrap();
+
+        assert_eq!(
+            decode_one(&simulator.read().unwrap()),
+            Frame::new(MessageType::Diagnostics, 0, diagnostic.encode_payload())
+        );
+        assert_eq!(
+            decode_one(&simulator.read().unwrap()),
+            Frame::new(MessageType::KnobEvent, 1, vec![0x02, 0])
+        );
     }
 
     #[test]

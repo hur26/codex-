@@ -29,6 +29,10 @@ const SAFE_DIAGNOSTICS = [
   "Device heartbeat failed",
   "Device worker could not start",
   "Virtual device state is unavailable",
+  "Device watchdog entered disconnected state",
+  "Device reported a CRC error",
+  "Device reported an invalid payload",
+  "Device local power or brightness limit is active",
 ] as const;
 
 describe("DeviceStatus", () => {

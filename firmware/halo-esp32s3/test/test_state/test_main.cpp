@@ -9,6 +9,16 @@ namespace {
 using halo::MessageType;
 using halo::NackReason;
 
+void assertDiagnostic(const halo::Diagnostic& diagnostic,
+                      halo::DiagnosticSeverity severity,
+                      halo::DiagnosticCode code, uint32_t value) {
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(severity),
+                          static_cast<uint8_t>(diagnostic.severity));
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(code),
+                           static_cast<uint16_t>(diagnostic.code));
+  TEST_ASSERT_EQUAL_UINT32(value, diagnostic.value);
+}
+
 std::vector<uint8_t> snapshotPayload(uint64_t revision = 42) {
   std::vector<uint8_t> payload;
   for (uint8_t index = 0; index < 8; ++index) {
@@ -195,6 +205,185 @@ void test_heartbeat_requires_empty_payload_and_has_no_response() {
   TEST_ASSERT_TRUE(controller.state().disconnected);
 }
 
+void test_diagnostic_payload_is_exact_little_endian_and_semantically_validated() {
+  const halo::Diagnostic expected{halo::DiagnosticSeverity::Warning,
+                                  halo::DiagnosticCode::CrcError, 0x78563412};
+  const std::vector<uint8_t> payload{2, 2, 0, 0x12, 0x34, 0x56, 0x78};
+  const auto encoded = expected.encodePayload();
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(payload.data(), encoded.data(), payload.size());
+  const auto decoded = halo::Diagnostic::decodePayload(payload);
+  TEST_ASSERT_TRUE(decoded.has_value());
+  assertDiagnostic(*decoded, expected.severity, expected.code, expected.value);
+
+  for (const auto& invalid : std::vector<std::vector<uint8_t>>{
+           {1, 1, 0, 0, 0, 0},
+           {1, 1, 0, 0, 0, 0, 0, 0},
+           {0, 1, 0, 0, 0, 0, 0},
+           {4, 1, 0, 0, 0, 0, 0},
+           {1, 0, 0, 0, 0, 0, 0},
+           {1, 5, 0, 0, 0, 0, 0},
+       }) {
+    TEST_ASSERT_FALSE(halo::Diagnostic::decodePayload(invalid).has_value());
+  }
+}
+
+void test_valid_desktop_diagnostic_is_silent_and_does_not_refresh_watchdog() {
+  halo::DeviceController controller;
+  establishSnapshot(controller);
+  while (controller.pendingDiagnostic().has_value()) {
+    controller.popPendingDiagnostic();
+  }
+  const auto before = controller.state();
+  const halo::Diagnostic diagnostic{halo::DiagnosticSeverity::Info,
+                                    halo::DiagnosticCode::LocalLimit, 30};
+
+  const auto response = controller.handle(
+      {MessageType::Diagnostics, 30, diagnostic.encodePayload()}, 3000);
+
+  TEST_ASSERT_FALSE(response.shouldSend);
+  TEST_ASSERT_FALSE(response.stateChanged);
+  TEST_ASSERT_EQUAL_UINT64(before.revision, controller.state().revision);
+  TEST_ASSERT_EQUAL_UINT8(before.globalBrightness,
+                          controller.state().globalBrightness);
+  controller.tick(3101);
+  TEST_ASSERT_TRUE(controller.state().disconnected);
+}
+
+void test_invalid_desktop_diagnostic_is_nacked_and_queues_malformed_report() {
+  halo::DeviceController controller;
+  const auto response = controller.handle(
+      {MessageType::Diagnostics, 31, {2, 5, 0, 0, 0, 0, 0}}, 100);
+
+  assertResponse(response, MessageType::Nack, 31);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(NackReason::MalformedPayload),
+                          response.payload[1]);
+  TEST_ASSERT_FALSE(controller.state().authoritative);
+  const auto pending = controller.pendingDiagnostic();
+  TEST_ASSERT_TRUE(pending.has_value());
+  assertDiagnostic(*pending, halo::DiagnosticSeverity::Warning,
+                   halo::DiagnosticCode::InvalidPayload, 1);
+}
+
+void test_incompatible_state_consumes_valid_diagnostic_and_rejects_invalid() {
+  halo::DeviceController controller;
+  establishSnapshot(controller);
+  halo::DecodeResult versionError;
+  versionError.error = halo::ProtocolError::UnsupportedVersion;
+  versionError.context.rawMessageType =
+      static_cast<uint8_t>(MessageType::FullSnapshot);
+  versionError.context.sequence = 32;
+  versionError.context.respondable = false;
+  controller.handleProtocolError(versionError);
+
+  const auto safeState = controller.state();
+  const auto pendingBefore = controller.pendingDiagnostic();
+  TEST_ASSERT_TRUE(safeState.disconnected);
+  TEST_ASSERT_FALSE(safeState.authoritative);
+  TEST_ASSERT_TRUE(pendingBefore.has_value());
+  assertDiagnostic(*pendingBefore, halo::DiagnosticSeverity::Info,
+                   halo::DiagnosticCode::LocalLimit, 30);
+
+  const halo::Diagnostic valid{halo::DiagnosticSeverity::Warning,
+                               halo::DiagnosticCode::CrcError, 7};
+  const auto silent = controller.handle(
+      {MessageType::Diagnostics, 33, valid.encodePayload()}, 3000);
+
+  TEST_ASSERT_FALSE(silent.shouldSend);
+  TEST_ASSERT_FALSE(silent.stateChanged);
+  TEST_ASSERT_EQUAL_UINT64(safeState.revision, controller.state().revision);
+  TEST_ASSERT_EQUAL_UINT8(safeState.globalBrightness,
+                          controller.state().globalBrightness);
+  TEST_ASSERT_EQUAL_UINT8(safeState.effectiveBrightness,
+                          controller.state().effectiveBrightness);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(safeState.displayMode),
+                          static_cast<uint8_t>(controller.state().displayMode));
+  TEST_ASSERT_EQUAL_UINT8(safeState.selectedRing,
+                          controller.state().selectedRing);
+  TEST_ASSERT_EQUAL_UINT8(safeState.authoritative,
+                          controller.state().authoritative);
+  TEST_ASSERT_EQUAL_UINT8(safeState.disconnected,
+                          controller.state().disconnected);
+  TEST_ASSERT_EQUAL_UINT32(1, controller.pendingDiagnosticCount());
+  const auto pendingAfterValid = controller.pendingDiagnostic();
+  TEST_ASSERT_TRUE(pendingAfterValid.has_value());
+  assertDiagnostic(*pendingAfterValid, halo::DiagnosticSeverity::Info,
+                   halo::DiagnosticCode::LocalLimit, 30);
+
+  const auto stillIncompatibleAfterValid =
+      controller.handle({MessageType::Heartbeat, 34, {}}, 3050);
+  assertResponse(stillIncompatibleAfterValid, MessageType::Nack, 34);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(NackReason::InvalidState),
+                          stillIncompatibleAfterValid.payload[1]);
+
+  const auto invalid = controller.handle(
+      {MessageType::Diagnostics, 35, {2, 5, 0, 0, 0, 0, 0}}, 3100);
+
+  assertResponse(invalid, MessageType::Nack, 35);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(NackReason::MalformedPayload),
+                          invalid.payload[1]);
+  TEST_ASSERT_EQUAL_UINT32(2, controller.pendingDiagnosticCount());
+  TEST_ASSERT_EQUAL_UINT64(safeState.revision, controller.state().revision);
+  TEST_ASSERT_EQUAL_UINT8(safeState.authoritative,
+                          controller.state().authoritative);
+  TEST_ASSERT_EQUAL_UINT8(safeState.disconnected,
+                          controller.state().disconnected);
+
+  const auto stillBlocked = controller.handle(
+      {MessageType::Heartbeat, 36, {}}, 3200);
+  assertResponse(stillBlocked, MessageType::Nack, 36);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(NackReason::InvalidState),
+                          stillBlocked.payload[1]);
+}
+
+void test_protocol_errors_coalesce_bounded_crc_and_malformed_diagnostics() {
+  halo::DeviceController controller;
+  halo::DecodeResult crc;
+  crc.error = halo::ProtocolError::CrcMismatch;
+  controller.handleProtocolError(crc);
+  controller.handleProtocolError(crc);
+
+  TEST_ASSERT_EQUAL_UINT8(1, controller.pendingDiagnosticCount());
+  assertDiagnostic(*controller.pendingDiagnostic(),
+                   halo::DiagnosticSeverity::Warning,
+                   halo::DiagnosticCode::CrcError, 2);
+  controller.popPendingDiagnostic();
+
+  halo::DecodeResult malformed;
+  malformed.error = halo::ProtocolError::InvalidPayloadLength;
+  malformed.context.rawMessageType =
+      static_cast<uint8_t>(MessageType::Brightness);
+  malformed.context.sequence = 32;
+  malformed.context.respondable = true;
+  const auto response = controller.handleProtocolError(malformed);
+
+  assertResponse(response, MessageType::Nack, 32);
+  assertDiagnostic(*controller.pendingDiagnostic(),
+                   halo::DiagnosticSeverity::Warning,
+                   halo::DiagnosticCode::InvalidPayload, 1);
+  TEST_ASSERT_LESS_OR_EQUAL_UINT8(4, controller.pendingDiagnosticCount());
+}
+
+void test_watchdog_and_local_clamp_queue_safe_edge_diagnostics() {
+  halo::DeviceController controller;
+  establishSnapshot(controller);
+
+  assertDiagnostic(*controller.pendingDiagnostic(), halo::DiagnosticSeverity::Info,
+                   halo::DiagnosticCode::LocalLimit,
+                   controller.state().effectiveBrightness);
+  controller.popPendingDiagnostic();
+  TEST_ASSERT_FALSE(controller.pendingDiagnostic().has_value());
+
+  controller.tick(3101);
+  TEST_ASSERT_TRUE(controller.state().disconnected);
+  assertDiagnostic(*controller.pendingDiagnostic(),
+                   halo::DiagnosticSeverity::Warning,
+                   halo::DiagnosticCode::WatchdogDisconnected,
+                   halo::kWatchdogTimeoutMs);
+  controller.popPendingDiagnostic();
+  controller.tick(6202);
+  TEST_ASSERT_FALSE(controller.pendingDiagnostic().has_value());
+}
+
 void test_device_to_host_message_is_unsupported() {
   halo::DeviceController controller;
   const auto response = controller.handle(
@@ -279,6 +468,12 @@ int main(int, char**) {
   RUN_TEST(test_invalid_display_or_brightness_is_nacked);
   RUN_TEST(test_hello_returns_fixed_capabilities);
   RUN_TEST(test_heartbeat_requires_empty_payload_and_has_no_response);
+  RUN_TEST(test_diagnostic_payload_is_exact_little_endian_and_semantically_validated);
+  RUN_TEST(test_valid_desktop_diagnostic_is_silent_and_does_not_refresh_watchdog);
+  RUN_TEST(test_invalid_desktop_diagnostic_is_nacked_and_queues_malformed_report);
+  RUN_TEST(test_incompatible_state_consumes_valid_diagnostic_and_rejects_invalid);
+  RUN_TEST(test_protocol_errors_coalesce_bounded_crc_and_malformed_diagnostics);
+  RUN_TEST(test_watchdog_and_local_clamp_queue_safe_edge_diagnostics);
   RUN_TEST(test_device_to_host_message_is_unsupported);
   RUN_TEST(test_decoder_error_is_nacked_and_version_error_enters_safe_state);
   RUN_TEST(test_respondable_decoder_error_returns_nack);

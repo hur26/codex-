@@ -42,6 +42,79 @@ impl TryFrom<u8> for MessageType {
     }
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticSeverity {
+    Info = 0x01,
+    Warning = 0x02,
+    Error = 0x03,
+}
+
+impl TryFrom<u8> for DiagnosticSeverity {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, ()> {
+        match value {
+            0x01 => Ok(Self::Info),
+            0x02 => Ok(Self::Warning),
+            0x03 => Ok(Self::Error),
+            _ => Err(()),
+        }
+    }
+}
+
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticCode {
+    WatchdogDisconnected = 0x0001,
+    CrcError = 0x0002,
+    InvalidPayload = 0x0003,
+    LocalLimit = 0x0004,
+}
+
+impl TryFrom<u16> for DiagnosticCode {
+    type Error = ();
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            0x0001 => Ok(Self::WatchdogDisconnected),
+            0x0002 => Ok(Self::CrcError),
+            0x0003 => Ok(Self::InvalidPayload),
+            0x0004 => Ok(Self::LocalLimit),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub severity: DiagnosticSeverity,
+    pub code: DiagnosticCode,
+    pub value: u32,
+}
+
+impl Diagnostic {
+    pub fn encode_payload(self) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(7);
+        payload.push(self.severity as u8);
+        payload.extend_from_slice(&(self.code as u16).to_le_bytes());
+        payload.extend_from_slice(&self.value.to_le_bytes());
+        payload
+    }
+
+    pub fn decode_payload(payload: &[u8]) -> Option<Self> {
+        let [severity, code_low, code_high, value @ ..] = payload else {
+            return None;
+        };
+        let value: [u8; 4] = (*value).try_into().ok()?;
+        Some(Self {
+            severity: DiagnosticSeverity::try_from(*severity).ok()?,
+            code: DiagnosticCode::try_from(u16::from_le_bytes([*code_low, *code_high])).ok()?,
+            value: u32::from_le_bytes(value),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
     pub message_type: MessageType,
@@ -309,6 +382,38 @@ mod tests {
             hex(&encode(&frame).expect("HELLO frame encodes")),
             "4348010101000100006e91"
         );
+    }
+
+    #[test]
+    fn diagnostics_payload_round_trips_fixed_semantics_and_little_endian_value() {
+        let diagnostic = Diagnostic {
+            severity: DiagnosticSeverity::Warning,
+            code: DiagnosticCode::CrcError,
+            value: 0x7856_3412,
+        };
+
+        assert_eq!(
+            diagnostic.encode_payload(),
+            vec![0x02, 0x02, 0x00, 0x12, 0x34, 0x56, 0x78]
+        );
+        assert_eq!(
+            Diagnostic::decode_payload(&diagnostic.encode_payload()),
+            Some(diagnostic)
+        );
+    }
+
+    #[test]
+    fn diagnostics_payload_rejects_invalid_length_severity_and_code() {
+        for payload in [
+            vec![1, 1, 0, 0, 0, 0],
+            vec![1, 1, 0, 0, 0, 0, 0, 0],
+            vec![0, 1, 0, 0, 0, 0, 0],
+            vec![4, 1, 0, 0, 0, 0, 0],
+            vec![1, 0, 0, 0, 0, 0, 0],
+            vec![1, 5, 0, 0, 0, 0, 0],
+        ] {
+            assert_eq!(Diagnostic::decode_payload(&payload), None, "{payload:?}");
+        }
     }
 
     #[test]

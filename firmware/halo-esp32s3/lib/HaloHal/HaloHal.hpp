@@ -110,4 +110,34 @@ class TxPump {
   size_t count_{0};
 };
 
+class DeviceEventSender {
+ public:
+  bool enqueue(TxPump& pump, MessageType type,
+               const std::vector<uint8_t>& payload) {
+    Frame frame{type, nextSequence_, payload};
+    if (!pump.enqueue(frame)) {
+      return false;
+    }
+    nextSequence_ = static_cast<uint16_t>(nextSequence_ + 1);
+    return true;
+  }
+
+  bool enqueuePendingDiagnostic(TxPump& pump,
+                                DeviceController& controller) {
+    const auto diagnostic = controller.pendingDiagnostic();
+    if (!diagnostic.has_value() ||
+        !enqueue(pump, MessageType::Diagnostics,
+                 diagnostic->encodePayload())) {
+      return false;
+    }
+    controller.popPendingDiagnostic();
+    return true;
+  }
+
+  uint16_t nextSequence() const { return nextSequence_; }
+
+ private:
+  uint16_t nextSequence_{0};
+};
+
 }  // namespace halo
